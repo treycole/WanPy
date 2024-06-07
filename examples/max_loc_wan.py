@@ -1,7 +1,11 @@
-from pythtb_Wannier import *
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from WanPy.pythtb_Wannier import *
+import WanPy.pythtb_Wannier as pythtb_Wannier 
 from pythtb import *
-import models
-import plotting as plot
+import WanPy.models as models
+import WanPy.plotting as plot
 
 import numpy as np
 import matplotlib.pyplot as plt

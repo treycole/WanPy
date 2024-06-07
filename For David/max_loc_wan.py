@@ -1,7 +1,7 @@
-from pythtb_Wannier import *
+from WanPy.pythtb_Wannier import *
 from pythtb import *
-import models
-import plotting as plot
+import WanPy.models as models
+import WanPy.plotting as plot
 
 import numpy as np
 import matplotlib.pyplot as plt

@@ -4,7 +4,7 @@ from itertools import product
 from itertools import combinations_with_replacement as comb
 from scipy.linalg import expm
 
-
+# TODO: figure out factor of 2 
 def get_recip_lat_vecs(model):
 
     lat_vecs = model.get_lat()
@@ -201,8 +201,8 @@ def get_psi_tilde(
     nks = shape[:-2]
     n_occ = int(n_state/2) # assuming half filled
 
-    if state_idx is None:
-        state_idx = list(range(0, n_occ)) # assuming we are Wannierizing occupied bands 
+    if state_idx is None: # assume we are Wannierizing occupied bands at half-filling 
+        state_idx = list(range(0, n_occ)) 
 
     tfs = set_trial_function(tf_list, n_orb)
     A = tf_overlap_mat(psi_wf, tfs, state_idx)
@@ -235,7 +235,8 @@ def DFT(psi_tilde, norm=None):
 
 def Wannierize(
         model, u_wfs, tf_list, state_idx = None,
-        compact_SVD=False, ret_psi_til=False):
+        k_mesh=None, compact_SVD=False, ret_psi_til=False
+        ):
     """
     Obtains Wannier functions cenetered in home unit cell.
 
@@ -260,7 +261,8 @@ def Wannierize(
     nks = shape[:-2]
 
     # get Bloch wfs
-    k_mesh = gen_k_mesh(*nks, flat=True, endpoint=False)
+    if k_mesh is None: # assume u_wfs is defined over full BZ
+        k_mesh = gen_k_mesh(*nks, flat=True, endpoint=False)
     psi_wfs = get_bloch_wfs(model, u_wfs, k_mesh)
     # get tilde states
     psi_tilde = get_psi_tilde(psi_wfs, tf_list, state_idx=state_idx, compact_SVD=compact_SVD)
@@ -559,7 +561,8 @@ def diag_h_in_subspace(model, eigvecs, k_path, ret_evecs=False):
 ####### Maximally Localized WF ############
 
 def find_optimal_subspace(
-        model, outer_states, inner_states, tol = 2e-4, full_mesh=False, k_mesh=None, iter_num=20):
+        model, outer_states, inner_states, tol = 2e-4, full_mesh=False, k_mesh=None, iter_num=20,
+        print_=False):
     """
     Assumes the states are defined in reciprocal space and are 
     of Bloch character (cell periodic), and that we have a square
@@ -666,21 +669,19 @@ def find_optimal_subspace(
             for idx, t_k in enumerate(b_idx):
                 P_avg += w_b * P_nbr_min[k][idx, :, : ]
             
-            # change of basis
+            # diagonalizing P_avg in outer_states basis
             N = outer_states.shape[-2]
             Z = np.zeros((N, N), dtype=complex)
             for n in range(N):
                 for m in range(N):
                     Z[m, n] = outer_states[k][m, :].conj() @ (P_avg @ outer_states[k][n, :])
-            
             eigvals, eigvecs = np.linalg.eigh(Z) # [val, idx]
-            
             for idx, n in enumerate(np.argsort(eigvals.real)[-dim_subspace:]): # keep ntfs wfs with highest eigenvalue
                 states_min[k][idx, :] = np.sum([eigvecs[i, n] * outer_states[k][i, :] for i in range(eigvecs.shape[0])], axis=0)
 
             P_new = np.sum( [np.outer(states_min[k][n, :], states_min[k][n, :].conj()) for n in range(dim_subspace)], axis=0)
-            diff = np.linalg.norm(P_min[k] - P_new)
-            alpha = 1
+            # diff = np.linalg.norm(P_min[k] - P_new)
+            alpha = 1 # mixing with previous step to break convergence loop
             P_min[k] = alpha * P_new + (1-alpha) * P_min[k] # for next iteration
             
             for idx, t_k in enumerate(b_idx):
@@ -710,8 +711,9 @@ def find_optimal_subspace(
                 Q_nbr_min[k][idx, :, :] = np.eye(n_orb) - P_nbr_min[k][idx, :, :] 
                 T_kb[k][idx] = np.trace(P_min[k] @ Q_nbr_min[k][idx, :, :])
 
-        Omega_I = (1/Nk) * w_b * np.sum(T_kb)
-        print(f"{i} Omega_I: {Omega_I.real}, diff: {diff}")
+        if print_:
+            Omega_I = (1/Nk) * w_b * np.sum(T_kb)
+            print(f"{i} Omega_I: {Omega_I.real}")
 
     return states_min
 
@@ -753,7 +755,6 @@ def find_min_unitary(model, M, eps=1/16, iter_num=10, print_=False):
     U[...] = np.eye(num_state, dtype=complex) # initialize as identity
     
     for i in range(iter_num):
-        print(i)
         G.fill(0)
         r_n.fill(0)
         dW.fill(0)
@@ -795,12 +796,123 @@ def find_min_unitary(model, M, eps=1/16, iter_num=10, print_=False):
         omega_tilde = spread[2]
 
         if omega_tilde > omega_tilde_prev:
-            print("Omega_til going up")
+            print("Warning: Omega_tilde increasing")
 
         # for i in range(M.shape[-1]):
         #     print(f"Min of M{i}{i} :", np.amin(abs(M[..., i, i])))
         if print_:
-            print(rf"Omega_til = {omega_tilde}")
-            print("Grad mag: ", np.linalg.norm(np.sum(G, axis=(0,1))))
+            print(i)
+            print(f"Omega_til = {omega_tilde}, Grad mag:  {np.linalg.norm(np.sum(G, axis=(0,1))): .5f}")
             # print("Divergence of T: ", np.amax(abs(T)))
     return U, M
+
+def get_max_loc_uwfs(
+        model, u_wfs, eps=1/16, iter_num=10, print_=False
+        ):
+    
+    if isinstance(u_wfs, wf_array):
+        shape = u_wfs._wfs.shape # [*nks, idx, orb]
+    else:
+        shape = u_wfs.shape # [*nks, idx, orb]
+    nks = shape[:-2] # tuple defining number of k points in BZ
+
+    orbs = model.get_orb() # ortbital vectors in reduced coordinates
+
+    M = k_overlap_mat(u_wfs, orbs=orbs) # [kx, ky, b, m, n]
+
+    ### minimizing Omega_tilde
+    U, _ = find_min_unitary(model, M, iter_num=iter_num, eps=eps, print_=print_)
+    u_max_loc = np.zeros(shape, dtype=complex)
+
+    k_vals = [range(nk) for nk in nks] # list of dim(dim_k) with all k indices along each dir
+    k_idx_arr = list(product(*k_vals)) # all pairwise combinations of k_indices
+    for k in k_idx_arr:
+        for i in range(u_wfs.shape[-2]):
+            for j in range(u_wfs.shape[-2]):
+                u_max_loc[k][i, :] += U[k][j, i] * u_wfs[k][j, :]
+
+    return u_max_loc
+
+def max_loc_Wan(
+        model, u_wfs, tf_list, outer_states, 
+        iter_num_omega_i = 3000, iter_num_omega_til=5000, eps=1e-3,
+        state_idx=None, print_=False, return_uwfs=False
+        ):
+    """
+    Find the maximally localized Wannier functions using the projection method
+
+    Args:
+        u_wfs: Bloch eigenstates defined over full k-mesh (excluding endpoint)
+        tf_list: list of trial orbital sites and their associated weights (can be un-normalized)
+        outer_states: manifold to 
+    """
+    if isinstance(u_wfs, wf_array):
+        shape = u_wfs._wfs.shape # [*nks, idx, orb]
+    else:
+        shape = u_wfs.shape # [*nks, idx, orb]
+    
+    nks = shape[:-2] # tuple defining number of k points in BZ
+    orbs = model.get_orb() # ortbital vectors in reduced coordinates
+    # n_orb = model.get_num_orbitals() # number of orbitals
+    # n_occ = int(n_orb/2) # number of occupied orbitals
+    # lat_vecs = model.get_lat() # lattice vectors
+
+    # get Bloch wfs by adding phase factors
+    k_mesh = gen_k_mesh(*nks, flat=True, endpoint=False)
+    psi_wfs = get_bloch_wfs(model, u_wfs, k_mesh)
+
+    # Get initial tilde states from projection of trial wfs onto states spanned by the band indices specified
+    psi_tilde = get_psi_tilde(psi_wfs, tf_list, state_idx=state_idx)
+    u_tilde_wan = get_bloch_wfs(model, psi_tilde, k_mesh, inverse=True)
+
+    M1 = k_overlap_mat(u_tilde_wan, orbs=orbs) # [kx, ky, b, m, n]
+    spread, _, _ = spread_recip(model, M1, decomp=True)
+    print(rf"Spread after initial projection = {spread[0]}")
+    print(rf"Omega_I after initial projection = {spread[1]}")
+    print(rf"Omega_til after initial projection = {spread[2]}")
+    print()
+
+    ### minimizing Omega_I
+    util_min_Wan = find_optimal_subspace(
+        model, outer_states, u_tilde_wan, iter_num=iter_num_omega_i, print_=print_)
+    psi_til_min = get_bloch_wfs(model, util_min_Wan, k_mesh)
+    # second projection of trial wfs onto full manifold spanned by psi_tilde
+    psi_til_til_min = get_psi_tilde(psi_til_min, tf_list, state_idx=list(range(psi_til_min.shape[2])))
+    u_til_til_min = get_bloch_wfs(model, psi_til_til_min, k_mesh, inverse=True)
+
+    M2 = k_overlap_mat(u_til_til_min, orbs=orbs) # [kx, ky, b, m, n]
+    spread, _, _ = spread_recip(model, M2, decomp=True)
+    print(rf"Spread after minimizing Omega_I + 2nd proj = {spread[0]}")
+    print(rf"Omega_I after minimizing Omega_I + 2nd proj = {spread[1]}")
+    print(rf"Omega_til after minimizing Omega_I + 2nd proj = {spread[2]}")
+    print()
+
+    ### minimizing Omega_tilde
+    # U, _ = find_min_unitary(model, M2, iter_num=iter_num_omega_til, eps=eps, print_=print_)
+    # u_max_loc = np.zeros(u_til_til_min.shape, dtype=complex)
+    # nkx, nky = nks[0], nks[1]
+    # for kx in range(nkx):
+    #     for ky in range(nky):
+    #         for i in range(u_min.shape[2]):
+    #             for j in range(u_min.shape[2]):
+    #                 u_max_loc[kx, ky, i, :] += U[kx, ky, j, i] * u_til_til_min[kx, ky, j]
+
+    u_max_loc = get_max_loc_uwfs(
+        model, u_til_til_min, eps=eps, iter_num=iter_num_omega_til, print_=print_
+        ) 
+    psi_max_loc = get_bloch_wfs(model, u_max_loc, k_mesh, inverse=False)
+
+    M3 = k_overlap_mat(u_max_loc, orbs=orbs) # [kx, ky, b, m, n]
+    spread, _, _ = spread_recip(model, M3, decomp=True)
+    print(rf"Spread after maximal localization = {spread[0]}")
+    print(rf"Omega_I after maximal localization = {spread[1]}")
+    print(rf"Omega_til after maximal localization = {spread[2]}")
+
+    # Fourier transform Bloch-like states
+    w0 = DFT(psi_max_loc)
+
+    if return_uwfs:
+        return w0, u_max_loc
+
+    else:
+        return w0
