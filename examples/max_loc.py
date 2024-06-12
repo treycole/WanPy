@@ -31,8 +31,8 @@ chern = u_wfs_full.berry_flux([i for i in range(n_occ)])/(2*np.pi)
 print(f"Chern number: {chern: .3f}")
 
 # get Bloch eigenstates on 2D k-mesh for Wannierization (exclude endpoints)
-nkx = 16
-nky = 16
+nkx = 10
+nky = 10
 Nk = nkx*nky
 k_mesh = gen_k_mesh(nkx, nky, flat=False, endpoint=False)
 u_wfs_Wan = wf_array(model, [nkx, nky])
@@ -48,13 +48,13 @@ tf_list = list(np.setdiff1d(low_E_sites, [omit_sites])) # delta on lower energy 
 
 w0, psi_til_wan = Wannierize(model, u_wfs_Wan, tf_list, ret_psi_til=True)
 u_tilde_wan = get_bloch_wfs(model, psi_til_wan, k_mesh, inverse=True)
-plot.plot_Wan(w0, 0, orbs, lat_vecs, plot_decay=True, show=True)
+# plot.plot_Wan(w0, 0, orbs, lat_vecs, plot_decay=True, show=True)
 
 # outer window of entangled bands is full occupied manifold
 outer_states = u_wfs_Wan._wfs[..., :n_occ, :]
 w0_max_loc = max_loc_Wan(model, u_wfs_Wan, tf_list, outer_states, 
-        iter_num_omega_i=300, iter_num_omega_til=500,
-        state_idx=None, print_=False, return_uwfs=False, eps=2e-3
+        iter_num_omega_i=100, iter_num_omega_til=5000,
+        state_idx=None, print_=True, return_uwfs=False, eps=2e-3
         )
 
 Wan_idx = 0
