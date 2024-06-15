@@ -4,32 +4,76 @@ from itertools import product
 from itertools import combinations_with_replacement as comb
 from scipy.linalg import expm
 
-def get_recip_lat_vecs(model):
-    lat_vecs = model.get_lat()
+def get_recip_lat_vecs(lat_vecs):
     b = 2 * np.pi * np.linalg.inv(lat_vecs).T
     return b
 
-# TODO: figure out factor of 2 
-def get_weights(*nks, model, N_sh=1):
-    b_vec = get_recip_lat_vecs(model)
-    dk = np.array([b_vec[i]/nk for i, nk in enumerate(nks)])
-    dim = b_vec.shape[0]
-    Cart_idx = list(comb(range(dim), 2))
+def get_k_shell(*nks, model, N_sh, tol_dp=8, report=False):
+
+    lat_vecs = model.get_lat() # lattice vectors
+    recip_vecs = get_recip_lat_vecs(lat_vecs)
+    dk = np.array([recip_vecs[i]/nk for i, nk in enumerate(nks)])
+    
+    # vectors of integers multiplying dk 
+    nnbr_idx = list(product(list(range(-N_sh, N_sh+1)), repeat=len(nks)))
+    nnbr_idx.remove((0,0))
+    nnbr_idx = np.array(nnbr_idx)
+
+    # vectors connecting k-points near Gamma point
+    b_vecs = np.array([nnbr_idx[i] @ dk for i in range(nnbr_idx.shape[0])]) 
+    dists = np.array([np.vdot(b_vecs[i], b_vecs[i]) for i in range(b_vecs.shape[0])])
+    dists = dists.round(tol_dp) 
+
+    # sorting by distance
+    sorted_idxs = np.argsort(dists)
+    dists_sorted = dists[sorted_idxs]
+    b_vecs_sorted = b_vecs[sorted_idxs]
+    nnbr_idx_sorted = nnbr_idx[sorted_idxs]
+
+    # keep only b_vecs in N_sh shells 
+    unique_dists = sorted(list(set(dists)))
+    keep_dists = unique_dists[:N_sh]
+    k_shell = [b_vecs_sorted[np.isin(dists_sorted, keep_dists[i])] for i in range(len(keep_dists))]
+    idx_shell = [nnbr_idx_sorted[np.isin(dists_sorted, keep_dists[i])] for i in range(len(keep_dists))]
+
+    if report:
+        dist_degen = {ud: len(k_shell[i]) for i, ud in enumerate(keep_dists)}
+        print(f"sorted dists: {dists_sorted}")
+        print(f"sorted b_vecs {b_vecs_sorted}")
+        print(f"sorted mask {nnbr_idx_sorted}")
+        print(f"unique dists: {unique_dists}")
+        print(f"Smallest N_sh dists: {keep_dists}")
+        print(f"Distances and degeneracies: {dist_degen}")
+        print(f"k-shells: {k_shell}")
+        print(f"idx-shells: {idx_shell}")
+        
+    return k_shell, idx_shell
+        
+
+def get_weights(*nks, model, N_sh=1, report=False):
+    k_shell, _ = get_k_shell(*nks, model=model, N_sh=N_sh, report=report)
+    dim_k = len(nks)
+    Cart_idx = list(comb(range(dim_k), 2))
     n_comb = len(Cart_idx)
 
     A = np.zeros((n_comb, N_sh))
     q = np.zeros((n_comb))
 
-    for s in range(N_sh):
-        for j, (alpha, beta) in enumerate(Cart_idx): 
-            if alpha == beta:
-                q[j] = 1
-            for k in dk:
-                A[j, s] += k[alpha] * k[beta]
-   
+    for j, (alpha, beta) in enumerate(Cart_idx):
+        if alpha == beta:
+            q[j] = 1
+        for s in range(N_sh):
+            b_star = k_shell[s]
+            for i in range(b_star.shape[0]):
+                b = b_star[i]
+                A[j, s] += b[alpha] * b[beta]
+                
     U, D, Vt = np.linalg.svd(A, full_matrices=False)
     w = (Vt.T @ np.linalg.inv(np.diag(D)) @ U.T) @ q
-    return w/2
+    if report:
+        print(f"Finite difference weights: {w}")
+
+    return w
 
 def gen_k_mesh(*nks, centered=False, flat=True, endpoint=False):
     """Generate k-mesh in reduced coordinates
@@ -240,6 +284,7 @@ def Wannierize(
     # get Bloch wfs
     if k_mesh is None: # assume u_wfs is defined over full BZ
         k_mesh = gen_k_mesh(*nks, flat=True, endpoint=False)
+    
     psi_wfs = get_bloch_wfs(model, u_wfs, k_mesh)
     # get tilde states
     psi_tilde = get_psi_tilde(psi_wfs, tf_list, state_idx=state_idx, compact_SVD=compact_SVD)
@@ -251,7 +296,7 @@ def Wannierize(
         return w_0n, psi_tilde
     return w_0n
 
-#### Spread functions ######
+#### Computing Spread ######
 
 #TODO: Allow for arbitrary dimensions
 def spread_real(model, w0, decomp=False):
@@ -274,41 +319,39 @@ def spread_real(model, w0, decomp=False):
     lat_vecs = model.get_lat() # lattice vectors
     orbs = model.get_orb()
     # shape = w0.shape # [*nks, idx, orb]
-
     # nxs = shape[:-2]
     # n_orb = shape[-1]
     # n_states = shape[-2]
-
     # assuming 2D for now
-    nx, ny, n_occ = w0.shape[0], w0.shape[1], w0.shape[2]
+    nx, ny, n_wfs = w0.shape[0], w0.shape[1], w0.shape[2]
     # translation vectors in reduced units
-    supercell = [(i,j) for i in range(-int((nx-nx%2)/2), int((nx-nx%2)/2)) 
-                for j in range(-int((ny-ny%2)/2), int((ny-ny%2)/2))]
+    supercell = [(i,j) for i in range(-nx//2, nx//2) 
+                for j in range(-ny//2, ny//2)]
     
-    r_n = np.zeros((n_occ, 2), dtype=complex) # <\vec{r}>_n
-    rsq_n = np.zeros(n_occ, dtype=complex) # <r^2>_n
-    R_nm = np.zeros((2, n_occ, n_occ, nx*ny), dtype=complex)
+    r_n = np.zeros((n_wfs, 2), dtype=complex) # <\vec{r}>_n
+    rsq_n = np.zeros(n_wfs, dtype=complex) # <r^2>_n
+    R_nm = np.zeros((2, n_wfs, n_wfs, nx*ny), dtype=complex)
 
     expc_rsq = 0 # <r^2> 
     expc_r_sq = 0 # <\vec{r}>^2
 
-    for n in range(n_occ): # "band" index
+    for n in range(n_wfs): # "band" index  
         for tx, ty in supercell: # cells in supercell
             for i, orb in enumerate(orbs): # values of Wannier function on lattice
-                w0n_r = w0[tx, ty, n, i] # Wannier function
                 pos = (orb[0] + tx)*lat_vecs[0] + (orb[1] + ty)*lat_vecs[1] # position
                 r = np.sqrt(pos[0]**2 + pos[1]**2)
+            
+                w0n_r = w0[tx, ty, n, i] # Wannier function
 
                 # expectation value of position (vector)
-                r_n[n, :] += np.array([pos[0] * abs(w0n_r)**2, pos[1] * abs(w0n_r)**2])
+                r_n[n, :] += abs(w0n_r)**2 * pos
                 rsq_n[n] += r**2 * w0n_r*w0n_r.conj()
 
                 if decomp:
-                    for m in range(n_occ):
+                    for m in range(n_wfs):
                         for j, [dx, dy] in enumerate(supercell):
                             wRm_r = w0[(tx+dx)%nx, (ty+dy)%ny, m, i] # translated Wannier function
-                            R_nm[0, n, m, j] += pos[0] * w0n_r*wRm_r.conj()
-                            R_nm[1, n, m, j] += pos[1] * w0n_r*wRm_r.conj()
+                            R_nm[:, n, m, j] += w0n_r*wRm_r.conj() * np.array(pos)
 
         expc_rsq += rsq_n[n]
         expc_r_sq += np.vdot(r_n[n, :], r_n[n, :])
@@ -316,16 +359,11 @@ def spread_real(model, w0, decomp=False):
     spread = expc_rsq - expc_r_sq
 
     if decomp:
-        Omega_inv = 0 # gauge invariant part of spread
-        Omega_tilde = 0 # gauge dependent part of spread
-
-        Omega_inv += expc_rsq
-        for i in range(R_nm.shape[1]):
-            for j in range(R_nm.shape[2]):
-                for k in range(R_nm.shape[3]):
-                    Omega_inv -= np.vdot(R_nm[:, i, j, k], R_nm[:, i, j, k])
-                    if not (i == j and supercell[k] == (0,0)):
-                        Omega_tilde += np.vdot(R_nm[:, i, j, k], R_nm[:, i, j, k])
+        sigma_Rnm_sq = np.sum(np.abs(R_nm)**2)
+        Omega_inv = expc_rsq - sigma_Rnm_sq
+        Omega_tilde = (
+            sigma_Rnm_sq 
+            - np.sum(np.abs( np.diagonal(R_nm[:, :, :,  supercell.index((0, 0))], axis1=1, axis2=2) ) ** 2))
 
         assert np.allclose(spread, Omega_inv+Omega_tilde)
         return [spread, Omega_inv, Omega_tilde], r_n, rsq_n
@@ -334,7 +372,7 @@ def spread_real(model, w0, decomp=False):
         return spread, r_n, rsq_n
 
 
-def k_overlap_mat(u_wfs, orbs=None):
+def k_overlap_mat(model, u_wfs):
     """ 
     Compute the overlap matrix of Bloch eigenstates. Assumes that the last u_wf
     along each periodic direction corresponds to the next to last k-point in the 
@@ -343,44 +381,45 @@ def k_overlap_mat(u_wfs, orbs=None):
 
     Args:
         u_wfs (np.array | wf_array): The cell periodic Bloch wavefunctions
+        orbs (np.array): Optional. The orbitals of the model. If u_wfs is of `wf_array`
+        type, the orbitals can be inferred from its attributes.
 
     Returns:
         M (np.array): overlap matrix
     """
     if isinstance(u_wfs, wf_array):
         shape = u_wfs._wfs.shape # [*nks, idx, orb]
-        orbs = u_wfs._model.get_orb()
         u_wfs = np.array(u_wfs._wfs)
     else:
         shape = u_wfs.shape # [*nks, idx, orb]
-        # need access to orbital vectors for pbc
-        assert orbs is not None, "Need to specify orbital vectors"
-        
+          
     nks = shape[:-2]
+    k_idx_arr = list(product(*[range(nk) for nk in nks])) # list of all k_indices
     n_states = shape[-2]
+    orbs = model.get_orb()
 
-    # Below works for arbitrary dimension but is more convoluted
-    # nnbr_mask = list(product([-1, 0, 1], repeat=len(nks)))
-    # b_idx_arr = np.array([nnbr_vec for nnbr_vec in nnbr_mask if sum(abs(nnbr) for nnbr in nnbr_vec) == 1], dtype=int) # index translation array
-
-    b_idx_arr = [np.array([1, 0]), np.array([0, 1]), np.array([-1, 0]), np.array([0, -1])] # vector connecting nearest neighboring k indices
-    
-    k_rng = [range(nk) for nk in nks] # list of dim(dim_k) with all k indices along each dir
-    k_idx_arr = list(product(*k_rng)) # all pairwise combinations of k_indices
-    
+    # Assumes only one shell for now
+    _, idx_shell = get_k_shell(*nks, model=model, N_sh=1, tol_dp=8, report=False)
+   
     # assumes that there is no last element in the k mesh, so we need to introduce phases
-    M = np.zeros((*nks, len(b_idx_arr), n_states, n_states), dtype=complex) # overlap matrix
-    for k in k_idx_arr:
-        for idx, b in enumerate(b_idx_arr): # nearest neighbors
-            k_nbr = np.array(k) + b
-            cross_bnry = True if np.any(np.in1d(k_nbr, [-1, *nks])) else False
-            bc_phase = np.array(np.exp(-1j*2*np.pi*orbs @ b.T ), dtype=complex).T if cross_bnry else 1
-            # apply pbc
-            k_nbr = np.mod(k_nbr, nks)
+    M = np.zeros((*nks, len(idx_shell[0]), n_states, n_states), dtype=complex) # overlap matrix
+    for k_idx in k_idx_arr:
+        for idx, idx_vec in enumerate(idx_shell[0]): # nearest neighbors
+            k_nbr_idx = np.array(k_idx) + idx_vec
+            # if the translated k-index contains the -1st or last_idx+1 then we crossed the BZ boundary
+            cross_bndry = True if np.any(np.in1d(k_nbr_idx, [-1, *nks])) else False
+            # apply pbc to index
+            mod_idx = np.mod(k_nbr_idx, nks)
+            if cross_bndry:
+                diff = k_nbr_idx - mod_idx
+                G = np.divide(np.array(diff), np.array(nks))
+                bc_phase = np.array(np.exp(-1j*2*np.pi * orbs @ G.T ), dtype=complex).T
+            else: 
+                bc_phase=1
 
             for n in range(n_states): # band index right (occupied)
                 for m in range(n_states): # band index left (occupied)
-                    M[k][idx, m, n] = np.vdot(u_wfs[k][m, :], u_wfs[tuple(k_nbr)][n, :] * bc_phase )
+                    M[k_idx][idx, m, n] = np.vdot(u_wfs[k_idx][m, :], u_wfs[tuple(mod_idx)][n, :] * bc_phase )
     return M
 
 def spread_recip(model, M, decomp=False):
@@ -397,31 +436,22 @@ def spread_recip(model, M, decomp=False):
             and the expectation of the position vector squared
     """
     shape = M.shape
+    n_states = shape[3]
     nks = M.shape[:-3]
     Nk = np.prod(nks)
-    n_states = shape[3]
+    k_idx_arr = list(product(*[range(nk) for nk in nks])) # list of all k_indices
 
-    recip_lat_vecs = get_recip_lat_vecs(model)
-    dk = [recip_lat_vecs[i]/nk for i, nk in enumerate(nks)]
-
-    w_b = get_weights(nks, model=model)[0] # Assumes only one shell (and factor of 2 error somehow)
-
-    k_vals = [range(nk) for nk in nks] # list of dim(dim_k) with all k indices along each dir
-    k_idx_arr = list(product(*k_vals)) # all pairwise combinations of k_indices
-
-    # nnbr_mask = list(product([-1, 0, 1], repeat=len(nks)))
-    # b_idx_arr = np.array([nnbr_vec for nnbr_vec in nnbr_mask if sum(abs(nnbr) for nnbr in nnbr_vec) == 1], dtype=int) # index translation array
-    b_idx_arr = [np.array([1, 0]), np.array([0, 1]), np.array([-1, 0]), np.array([0, -1])] # vectors connecting nearest neighbor k points
+    # Assumes only one shell for now
+    k_shell, _ = get_k_shell(*nks, model=model, N_sh=1, tol_dp=8, report=False)
+    w_b = get_weights(*nks, model=model, N_sh=1)[0] 
     
     r_n = np.zeros((n_states, 2), dtype=complex) # <\vec{r}>_n
     rsq_n = np.zeros(n_states, dtype=complex) # <r^2>_n
     expc_rsq = 0 # <r^2> 
     expc_r_sq = 0 # <\vec{r}>^2
-
     for n in range(n_states):
         for k in k_idx_arr:
-            for idx, b_idx in enumerate(b_idx_arr):
-                b = b_idx @ dk
+            for idx, b in enumerate(k_shell[0]):
                 r_n[n, :] += -(1/Nk) * w_b * b * np.log(M[k][idx, n, n]).imag
                 rsq_n[n] += (1/Nk) * w_b * (1 - abs(M[k][idx, n, n])**2 + np.log(M[k][idx, n, n]).imag**2)
                     
@@ -434,8 +464,7 @@ def spread_recip(model, M, decomp=False):
         Omega_i = 0
         Omega_tilde = 0
         for k in k_idx_arr:
-            for idx, b_idx in enumerate(b_idx_arr):
-                b = b_idx @ dk
+            for idx, b in enumerate(k_shell[0]):
                 Omega_i += (1/Nk) * w_b * n_states 
                 for n in range(n_states):
                     Omega_tilde += (1/Nk) * w_b * (-np.log(M[k][idx, n, n]).imag - np.vdot(b, r_n[n]))**2
@@ -538,8 +567,7 @@ def diag_h_in_subspace(model, eigvecs, k_path, ret_evecs=False):
 ####### Maximally Localized WF ############
 
 def find_optimal_subspace(
-        model, outer_states, inner_states, tol = 2e-4, full_mesh=False, k_mesh=None, iter_num=100,
-        print_=False):
+        model, outer_states, inner_states, iter_num=100, print_=False):
     """
     Assumes the states are defined in reciprocal space and are 
     of Bloch character (cell periodic), and that we have a square
@@ -571,64 +599,43 @@ def find_optimal_subspace(
     n_orb = shape[-1] 
     n_states = shape[-2]
     dim_subspace = n_states
-
-    lat_vecs = model.get_lat() # lattice vectors
+    k_idx_arr = list(product(*[range(nk) for nk in nks])) # all pairwise combinations of k_indices
     orbs = model.get_orb()
-    per_dir = model._per    # list of periodic dimensions
-    # slice second dimension to only keep only periodic dimensions in orb
-    per_orbs = orbs[:, per_dir]
 
-    k_vals = [range(nk) for nk in nks] # list of dim = dim_k with all k indices along each dir
-    k_idx_arr = list(product(*k_vals)) # all pairwise combinations of k_indices
-
-    # 2D k-mesh
-    num_NN = 2*len(nks) # number of nearest neighbors to a given k point where states defined
-    G = 2*np.pi/lat_vecs[0][0] # reciprocal lattice vector
-    b = G / nks[0]  # spacing between allowed kx
-    w_b = len(nks)/(num_NN * b**len(nks)) # finite difference weights for cubic lattice
-    nnbr_mask = list(product([-1, 0, 1], repeat=len(nks)))
-    b_idx = np.array([nnbr_vec for nnbr_vec in nnbr_mask if sum(abs(nnbr) for nnbr in nnbr_vec) == 1], dtype=int) # index translation array 
+    # Assumes only one shell for now
+    k_shell, idx_shell = get_k_shell(*nks, model=model, N_sh=1, tol_dp=8, report=False)
+    w_b = get_weights(*nks, model=model, N_sh=1)[0] 
 
     # Projector on initial subspace at each k
     P = np.zeros((*nks, n_orb, n_orb), dtype=complex)
     Q = np.zeros((*nks, n_orb, n_orb), dtype=complex)
-    for k in k_idx_arr:
-        P[k][:, :] = np.sum([np.outer(inner_states[k][n, :], inner_states[k][n, :].conj() ) for n in range(int(n_states))], axis=0)
-        Q[k][:, :] = np.eye(P[k].shape[0]) - P[k]
+    for k_idx in k_idx_arr:
+        P[k_idx][:, :] = np.sum([np.outer(inner_states[k_idx][n, :], inner_states[k_idx][n, :].conj() ) for n in range(int(n_states))], axis=0)
+        Q[k_idx][:, :] = np.eye(P[k_idx].shape[0]) - P[k_idx]
 
     # Projector on initial subspace at each k (for pbc of neighboring spaces)
-    P_nbr = np.zeros((*nks, num_NN, n_orb, n_orb), dtype=complex)
-    Q_nbr = np.zeros((*nks, num_NN, n_orb, n_orb), dtype=complex)
-    T_kb = np.zeros((*nks, num_NN), dtype=complex)
+    P_nbr = np.zeros((*nks, len(k_shell[0]), n_orb, n_orb), dtype=complex)
+    Q_nbr = np.zeros((*nks, len(k_shell[0]), n_orb, n_orb), dtype=complex)
+    T_kb = np.zeros((*nks, len(k_shell[0])), dtype=complex)
 
-    for k in k_idx_arr:
-        for idx, t_k in enumerate(b_idx):
-            k_nbr_idx = tuple(np.array(k) + t_k)
-            k_nbr_idx_pbc = tuple(np.mod(k_nbr_idx, nks))
-
-            # TODO: This needs fixed. I don't think it correctly identifies boundaries since
-            # the difference between neighboring k-points will never be 1 on a non-full k-mesh
-            # but we could've crossed boundary (e.g. [0, 0.9...] -> [0, 0]) 
-            if k_mesh is not None: # first and last index not necessarily at border
-                k_pt = k_mesh[k]
-                knbr_pt = k_mesh[k_nbr_idx_pbc]
-                G = knbr_pt - k_pt # reciprocal lattice vector separating neighbors (dimensionless)
-                cross_bndry =  np.any(np.in1d(G, [1, -1]))
-            else:
-                # if we were at 0th or last index
-                cross_bndry = np.any(np.in1d(k_nbr_idx, [-1, *nks]))
-                G = t_k
-            # if full_mesh then phases already included at boundary
-            if cross_bndry and not full_mesh:
-                # assumes first and last indices are at edge of BZ
-                bc_phase = np.exp(-1j*2*np.pi* per_orbs @ G.T, dtype=complex).T 
-            else:
+    for k_idx in k_idx_arr:
+        for idx, idx_vec in enumerate(idx_shell[0]): # nearest neighbors
+            k_nbr_idx = np.array(k_idx) + idx_vec
+            # apply pbc to index
+            mod_idx = np.mod(k_nbr_idx, nks)
+            diff = k_nbr_idx - mod_idx
+            G = np.divide(np.array(diff), np.array(nks))
+            # if the translated k-index contains the -1st or last_idx+1 then we crossed the BZ boundary
+            cross_bndry = True if np.any(np.in1d(k_nbr_idx, [-1, *nks])) else False
+            if cross_bndry:
+                bc_phase = np.array(np.exp(-1j*2*np.pi * orbs @ G.T ), dtype=complex).T
+            else: 
                 bc_phase = 1
 
             # apply pbc
-            state_pbc = inner_states[k_nbr_idx_pbc] * bc_phase
-            P_nbr[k][idx, :, :] = np.sum([np.outer(state_pbc[n].T, state_pbc[n].conj()) for n in range(int(n_states))], axis=0)
-            Q_nbr[k][idx, :, :] = np.eye(n_orb) - P_nbr[k][idx, :, :] 
+            state_pbc = inner_states[tuple(mod_idx)] * bc_phase
+            P_nbr[k_idx][idx, :, :] = np.sum([np.outer(state_pbc[n].T, state_pbc[n].conj()) for n in range(int(n_states))], axis=0)
+            Q_nbr[k_idx][idx, :, :] = np.eye(n_orb) - P_nbr[k_idx][idx, :, :] 
 
     P_min = np.copy(P) # start of iteration
     P_nbr_min = np.copy(P_nbr) # start of iteration
@@ -639,52 +646,43 @@ def find_optimal_subspace(
 
     # diff = None
     for i in range(iter_num):
-        for k in k_idx_arr:
-            P_avg = np.sum(w_b * P_nbr_min[k], axis=0)
+        for k_idx in k_idx_arr:
+            P_avg = np.sum(w_b * P_nbr_min[k_idx], axis=0)
             
             # diagonalizing P_avg in outer_states basis
             N = outer_states.shape[-2]
             Z = np.zeros((N, N), dtype=complex)
             for n in range(N):
                 for m in range(N):
-                    Z[m, n] = outer_states[k][m, :].conj() @ (P_avg @ outer_states[k][n, :])
+                    Z[m, n] = outer_states[k_idx][m, :].conj() @ (P_avg @ outer_states[k_idx][n, :])
             # Z = np.einsum('ni,nj->ij', outer_states[k].conj(), P_avg @ outer_states[k])
 
             eigvals, eigvecs = np.linalg.eigh(Z) # [val, idx]
             for idx, n in enumerate(np.argsort(eigvals.real)[-dim_subspace:]): # keep ntfs wfs with highest eigenvalue
-                states_min[k][idx, :] = np.sum([eigvecs[i, n] * outer_states[k][i, :] for i in range(eigvecs.shape[0])], axis=0)
+                states_min[k_idx][idx, :] = np.sum([eigvecs[i, n] * outer_states[k_idx][i, :] for i in range(eigvecs.shape[0])], axis=0)
 
-            P_new = np.einsum('ni,nj->ij', states_min[k], states_min[k].conj())
+            P_new = np.einsum('ni,nj->ij', states_min[k_idx], states_min[k_idx].conj())
             # diff = np.linalg.norm(P_min[k] - P_new)
             alpha = 1 # mixing with previous step to break convergence loop
-            P_min[k] = alpha * P_new + (1-alpha) * P_min[k] # for next iteration
-            
-            for idx, t_k in enumerate(b_idx):
-                k_nbr_idx = tuple(np.array(k) + t_k)
-                k_nbr_idx_pbc = tuple(np.mod(k_nbr_idx, nks))
+            P_min[k_idx] = alpha * P_new + (1-alpha) * P_min[k_idx] # for next iteration
 
-                if k_mesh is not None:
-                    k_pt = k_mesh[k]
-                    knbr_pt = k_mesh[k_nbr_idx_pbc]
-                    G = knbr_pt - k_pt
-                    # if G is a reciprocal lattice vector we crossed boundary
-                    cross_bndry =  np.any(np.in1d(G, [1, -1]))
-                else: # we assume that the first and last indices in the k mesh are at the boundary
-                    # if we were at 0th or last index
-                    cross_bndry = np.any(np.in1d(k_nbr_idx, [-1, *nks]))
-                    G = t_k
-
-                if cross_bndry and not full_mesh:
-                    # assumes first and last indices are at edge of BZ
-                    bc_phase = np.array(np.exp(-1j*2*np.pi* per_orbs @ G.T), dtype=complex).T 
-                else:
+            for idx, idx_vec in enumerate(idx_shell[0]): # nearest neighbors
+                k_nbr_idx = np.array(k_idx) + idx_vec
+                mod_idx = np.mod(k_nbr_idx, nks)
+                diff = k_nbr_idx - mod_idx
+                G = np.divide(np.array(diff), np.array(nks))
+                # if the translated k-index contains the -1st or last_idx+1 then we crossed the BZ boundary
+                cross_bndry = True if np.any(np.in1d(k_nbr_idx, [-1, *nks])) else False
+                if cross_bndry:
+                    bc_phase = np.array(np.exp(-1j*2*np.pi * orbs @ G.T ), dtype=complex).T
+                else: 
                     bc_phase = 1
 
                 # apply pbc
-                state_pbc = states_min[k_nbr_idx_pbc] * bc_phase
-                P_nbr_min[k][idx, :, :] = np.einsum('ni,nj->ij', state_pbc, state_pbc.conj())
-                Q_nbr_min[k][idx, :, :] = np.eye(n_orb) - P_nbr_min[k][idx, :, :] 
-                T_kb[k][idx] = np.trace(P_min[k] @ Q_nbr_min[k][idx, :, :])
+                state_pbc = states_min[tuple(mod_idx)] * bc_phase
+                P_nbr_min[k_idx][idx, :, :] = np.einsum('ni,nj->ij', state_pbc, state_pbc.conj())
+                Q_nbr_min[k_idx][idx, :, :] = np.eye(n_orb) - P_nbr_min[k_idx][idx, :, :] 
+                T_kb[k_idx][idx] = np.trace(P_min[k_idx] @ Q_nbr_min[k_idx][idx, :, :])
 
         if print_:
             Omega_I = (1/Nk) * w_b * np.sum(T_kb)
@@ -701,18 +699,11 @@ def find_min_unitary(model, M, eps=1/160, iter_num=10, print_=False):
     Nk = np.prod(nks)
     numNN = shape[-3]
     num_state = shape[-1]
+    k_idx_arr = list(product(*[range(nk) for nk in nks])) # all pairwise combinations of k_indices
 
-    recip_lat_vecs = get_recip_lat_vecs(model) # reciprocal lattice vectors
-    dk = np.array([recip_lat_vecs[i]/nk for i, nk in enumerate(nks)]) # basis vectors of spacing between allowed crystal momenta
-
-    w_b = get_weights(nks, model=model)[0] # Assumes only one shell (and factor of 2 error somehow)
-
-    k_vals = [range(nk) for nk in nks] # list of dim(dim_k) with all k indices along each dir
-    k_idx_arr = list(product(*k_vals)) # all pairwise combinations of k_indices
-
-    # nnbr_mask = list(product([-1, 0, 1], repeat=len(nks)))
-    # b_idx_arr = np.array([nnbr_vec for nnbr_vec in nnbr_mask if sum(abs(nnbr) for nnbr in nnbr_vec) == 1], dtype=int) # index translation array
-    b_idx_arr = [np.array([1, 0]), np.array([0, 1]), np.array([-1, 0]), np.array([0, -1])] # vectors connecting nearest neighbor k points
+    # Assumes only one shell for now
+    k_shell, idx_shell = get_k_shell(*nks, model=model, N_sh=1, tol_dp=8, report=False)
+    w_b = get_weights(*nks, model=model, N_sh=1)[0] 
 
     q = np.zeros((*nks, numNN, num_state), dtype=complex)
     R = np.zeros((*nks, numNN, num_state, num_state), dtype=complex) 
@@ -736,38 +727,52 @@ def find_min_unitary(model, M, eps=1/160, iter_num=10, print_=False):
 
         for n in range(num_state):
             r_n[n, :] = - (1/Nk) * w_b * np.sum(
-                [b_idx @ dk * np.log(M[k][idx, n, n]).imag 
-                for k in k_idx_arr for idx, b_idx in enumerate(b_idx_arr)], axis=0)
+                [b_vec * np.log(M[k][b_idx, n, n]).imag 
+                for k in k_idx_arr for b_idx, b_vec in enumerate(k_shell[0])], axis=0)
                 
-        for k in k_idx_arr:
-            for idx, b_idx in enumerate(b_idx_arr):
-                b = b_idx @ dk # reciprocal translation vec
-                k_nbr_idx = tuple(np.array(k) + b_idx)
-                k_nbr_idx = np.mod(k_nbr_idx, nks)
+
+        for k_idx in k_idx_arr:
+            for idx, b_vec in enumerate(k_shell[0]): # nearest neighbors
                 for n in range(num_state):
-                    q[k][idx, n] = np.log(M[k][idx, n, n]).imag + np.vdot(b, r_n[n])
-                    R[k][idx, :, n] = M[k][idx, :, n] * M[k][idx, n, n].conj()
-                    T[k][idx, :, n] = (M[k][idx, :, n] /  M[k][idx, n, n]) * q[k][idx, n]
+                    q[k_idx][idx, n] = np.log(M[k_idx][idx, n, n]).imag + np.vdot(b_vec, r_n[n])
+                    R[k_idx][idx, :, n] = M[k_idx][idx, :, n] * M[k_idx][idx, n, n].conj()
+                    T[k_idx][idx, :, n] = (M[k_idx][idx, :, n] /  M[k_idx][idx, n, n]) * q[k_idx][idx, n]
                     
-                A_R = (R[k][idx] - R[k][idx].conj().T) / 2
-                S_T = (T[k][idx] + T[k][idx].conj().T) / (2j)
-                G[k] += 4 * w_b * ( A_R - S_T )
+                A_R = (R[k_idx][idx] - R[k_idx][idx].conj().T) / 2
+                S_T = (T[k_idx][idx] + T[k_idx][idx].conj().T) / (2j)
+                G[k_idx] += 4 * w_b * ( A_R - S_T )
 
-            dW[k] = eps * G[k]
-            U[k] = U[k] @ expm(dW[k])
+            dW[k_idx] = eps * G[k_idx]
+            U[k_idx] = U[k_idx] @ expm(dW[k_idx])
+                
+
+        # for k in k_idx_arr:
+        #     for idx, b_idx in enumerate(b_idx_arr):
+        #         b = b_idx @ dk # reciprocal translation vec
+        #         for n in range(num_state):
+        #             q[k][idx, n] = np.log(M[k][idx, n, n]).imag + np.vdot(b, r_n[n])
+        #             R[k][idx, :, n] = M[k][idx, :, n] * M[k][idx, n, n].conj()
+        #             T[k][idx, :, n] = (M[k][idx, :, n] /  M[k][idx, n, n]) * q[k][idx, n]
+                    
+        #         A_R = (R[k][idx] - R[k][idx].conj().T) / 2
+        #         S_T = (T[k][idx] + T[k][idx].conj().T) / (2j)
+        #         G[k] += 4 * w_b * ( A_R - S_T )
+
+        #     dW[k] = eps * G[k]
+        #     U[k] = U[k] @ expm(dW[k])
 
         for k in k_idx_arr:
-            for idx, b_idx in enumerate(b_idx_arr):
-                k_nbr_idx = tuple(np.array(k) + b_idx)
-                k_nbr_idx = np.mod(k_nbr_idx, nks)
-                M[k][idx, :, :] = U[k].conj().T @ M0[k][idx, :, :] @ U[tuple(k_nbr_idx)]
+            for idx, idx_vec in enumerate(idx_shell[0]):
+                k_nbr_idx = np.array(k) + idx_vec
+                mod_idx = np.mod(k_nbr_idx, nks)
+                M[k][idx, :, :] = U[k].conj().T @ M0[k][idx, :, :] @ U[tuple(mod_idx)]
 
         spread, _, _ = spread_recip(model, M, decomp=True)
         omega_tilde = spread[2]
 
-        if omega_tilde > omega_tilde_prev:
-            print("Warning: Omega_tilde increasing. Decreasing eps by 10%.")
-            eps = eps * 0.9
+        # if omega_tilde > omega_tilde_prev:
+        #     print("Warning: Omega_tilde increasing. Decreasing eps by 10%.")
+        #     eps = eps * 0.9
 
         if print_:
             print(f"{i} Omega_til = {omega_tilde.real}, Grad mag: {np.linalg.norm(np.sum(G, axis=(0,1)))}")
@@ -786,9 +791,7 @@ def get_max_loc_uwfs(
         shape = u_wfs.shape # [*nks, idx, orb]
     nks = shape[:-2] # tuple defining number of k points in BZ
 
-    orbs = model.get_orb() # ortbital vectors in reduced coordinates
-
-    M = k_overlap_mat(u_wfs, orbs=orbs) # [kx, ky, b, m, n]
+    M = k_overlap_mat(model, u_wfs) # [kx, ky, b, m, n]
 
     ### minimizing Omega_tilde
     U, _ = find_min_unitary(model, M, iter_num=iter_num, eps=eps, print_=print_)
@@ -835,7 +838,7 @@ def max_loc_Wan(
     psi_tilde = get_psi_tilde(psi_wfs, tf_list, state_idx=state_idx)
     u_tilde_wan = get_bloch_wfs(model, psi_tilde, k_mesh, inverse=True)
 
-    M1 = k_overlap_mat(u_tilde_wan, orbs=orbs) # [kx, ky, b, m, n]
+    M1 = k_overlap_mat(model, u_tilde_wan) # [kx, ky, b, m, n]
     spread, _, _ = spread_recip(model, M1, decomp=True)
     print(rf"Spread after initial projection = {spread[0]}")
     print(rf"Omega_I after initial projection = {spread[1]}")
@@ -850,7 +853,7 @@ def max_loc_Wan(
     psi_til_til_min = get_psi_tilde(psi_til_min, tf_list, state_idx=list(range(psi_til_min.shape[2])))
     u_til_til_min = get_bloch_wfs(model, psi_til_til_min, k_mesh, inverse=True)
 
-    M2 = k_overlap_mat(u_til_til_min, orbs=orbs) # [kx, ky, b, m, n]
+    M2 = k_overlap_mat(model, u_til_til_min) # [kx, ky, b, m, n]
     spread, _, _ = spread_recip(model, M2, decomp=True)
     print(rf"Spread after minimizing Omega_I + 2nd proj = {spread[0]}")
     print(rf"Omega_I after minimizing Omega_I + 2nd proj = {spread[1]}")
@@ -872,7 +875,7 @@ def max_loc_Wan(
         ) 
     psi_max_loc = get_bloch_wfs(model, u_max_loc, k_mesh, inverse=False)
 
-    M3 = k_overlap_mat(u_max_loc, orbs=orbs) # [kx, ky, b, m, n]
+    M3 = k_overlap_mat(model, u_max_loc) # [kx, ky, b, m, n]
     spread, _, _ = spread_recip(model, M3, decomp=True)
     print(rf"Spread after maximal localization = {spread[0]}")
     print(rf"Omega_I after maximal localization = {spread[1]}")

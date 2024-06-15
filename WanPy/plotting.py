@@ -4,7 +4,7 @@ from matplotlib.colors import LogNorm
 
 def plot_bands(
         model, k_path, 
-        evals=None, evecs=None, k_vec=None,
+        nk=101, evals=None, evecs=None, k_vec=None,
         k_label=None, title=None, save_name=None, sub_lat=False,
         red_lat_idx=None, blue_lat_idx=None, show=False
         ):
@@ -30,7 +30,6 @@ def plot_bands(
     
     fig, ax = plt.subplots()
 
-    nk = 101
     (k_vec, k_dist, k_node) = model.k_path(k_path, nk, report=False)
 
     ax.set_xlim(0, k_node[-1])
