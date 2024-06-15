@@ -744,22 +744,6 @@ def find_min_unitary(model, M, eps=1/160, iter_num=10, print_=False):
 
             dW[k_idx] = eps * G[k_idx]
             U[k_idx] = U[k_idx] @ expm(dW[k_idx])
-                
-
-        # for k in k_idx_arr:
-        #     for idx, b_idx in enumerate(b_idx_arr):
-        #         b = b_idx @ dk # reciprocal translation vec
-        #         for n in range(num_state):
-        #             q[k][idx, n] = np.log(M[k][idx, n, n]).imag + np.vdot(b, r_n[n])
-        #             R[k][idx, :, n] = M[k][idx, :, n] * M[k][idx, n, n].conj()
-        #             T[k][idx, :, n] = (M[k][idx, :, n] /  M[k][idx, n, n]) * q[k][idx, n]
-                    
-        #         A_R = (R[k][idx] - R[k][idx].conj().T) / 2
-        #         S_T = (T[k][idx] + T[k][idx].conj().T) / (2j)
-        #         G[k] += 4 * w_b * ( A_R - S_T )
-
-        #     dW[k] = eps * G[k]
-        #     U[k] = U[k] @ expm(dW[k])
 
         for k in k_idx_arr:
             for idx, idx_vec in enumerate(idx_shell[0]):
@@ -770,9 +754,9 @@ def find_min_unitary(model, M, eps=1/160, iter_num=10, print_=False):
         spread, _, _ = spread_recip(model, M, decomp=True)
         omega_tilde = spread[2]
 
-        # if omega_tilde > omega_tilde_prev:
-        #     print("Warning: Omega_tilde increasing. Decreasing eps by 10%.")
-        #     eps = eps * 0.9
+        if omega_tilde > omega_tilde_prev:
+            print("Warning: Omega_tilde increasing. Decreasing eps by 10%.")
+            eps = eps * 0.9
 
         if print_:
             print(f"{i} Omega_til = {omega_tilde.real}, Grad mag: {np.linalg.norm(np.sum(G, axis=(0,1)))}")
@@ -825,10 +809,6 @@ def max_loc_Wan(
         shape = u_wfs.shape # [*nks, idx, orb]
     
     nks = shape[:-2] # tuple defining number of k points in BZ
-    orbs = model.get_orb() # ortbital vectors in reduced coordinates
-    # n_orb = model.get_num_orbitals() # number of orbitals
-    # n_occ = int(n_orb/2) # number of occupied orbitals
-    # lat_vecs = model.get_lat() # lattice vectors
 
     # get Bloch wfs by adding phase factors
     k_mesh = gen_k_mesh(*nks, flat=True, endpoint=False)
@@ -859,16 +839,6 @@ def max_loc_Wan(
     print(rf"Omega_I after minimizing Omega_I + 2nd proj = {spread[1]}")
     print(rf"Omega_til after minimizing Omega_I + 2nd proj = {spread[2]}")
     print()
-
-    ### minimizing Omega_tilde
-    # U, _ = find_min_unitary(model, M2, iter_num=iter_num_omega_til, eps=eps, print_=print_)
-    # u_max_loc = np.zeros(u_til_til_min.shape, dtype=complex)
-    # nkx, nky = nks[0], nks[1]
-    # for kx in range(nkx):
-    #     for ky in range(nky):
-    #         for i in range(u_min.shape[2]):
-    #             for j in range(u_min.shape[2]):
-    #                 u_max_loc[kx, ky, i, :] += U[kx, ky, j, i] * u_til_til_min[kx, ky, j]
 
     u_max_loc = get_max_loc_uwfs(
         model, u_til_til_min, eps=eps, iter_num=iter_num_omega_til, print_=print_
