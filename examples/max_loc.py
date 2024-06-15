@@ -14,11 +14,18 @@ import sympy as sp
 import scipy
 ###########################
 
-delta = 1
-t0 = 0.4 # >= 0.25 in Chern phase
-tprime = 0.5
+# Checkerboard model
+# delta = 1
+# t0 = 0.4 # >= 0.25 in Chern phase
+# tprime = 0.5
+# model = models.chessboard(t0, tprime, delta).make_supercell([[2,0], [0,2]])
 
-model = models.chessboard(t0, tprime, delta).make_supercell([[2,0], [0,2]])
+# Haldane model
+delta = 1
+t = -1
+t2 = 0.2 # >= 0.2 in Chern phase
+model = models.Haldane(delta, t, t2).make_supercell([[2,0], [0,2]])
+
 orbs = model.get_orb()
 n_orb = model.get_num_orbitals()
 n_occ = int(n_orb/2)
@@ -31,8 +38,8 @@ chern = u_wfs_full.berry_flux([i for i in range(n_occ)])/(2*np.pi)
 print(f"Chern number: {chern: .3f}")
 
 # get Bloch eigenstates on 2D k-mesh for Wannierization (exclude endpoints)
-nkx = 10
-nky = 10
+nkx = 20
+nky = 20
 Nk = nkx*nky
 k_mesh = gen_k_mesh(nkx, nky, flat=False, endpoint=False)
 u_wfs_Wan = wf_array(model, [nkx, nky])
@@ -53,8 +60,8 @@ u_tilde_wan = get_bloch_wfs(model, psi_til_wan, k_mesh, inverse=True)
 # outer window of entangled bands is full occupied manifold
 outer_states = u_wfs_Wan._wfs[..., :n_occ, :]
 w0_max_loc = max_loc_Wan(model, u_wfs_Wan, tf_list, outer_states, 
-        iter_num_omega_i=100, iter_num_omega_til=5000,
-        state_idx=None, print_=True, return_uwfs=False, eps=2e-3
+        iter_num_omega_i=2000, iter_num_omega_til=5000,
+        state_idx=None, print_=True, return_uwfs=False, eps=2e-3, report=True
         )
 
 Wan_idx = 0
