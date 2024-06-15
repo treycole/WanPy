@@ -793,8 +793,9 @@ def get_max_loc_uwfs(
 
 def max_loc_Wan(
         lat_vecs, orbs, u_wfs, tf_list, outer_states, 
-        iter_num_omega_i = 3000, iter_num_omega_til=5000, eps=1e-3,
-        tol = 1e-17, state_idx=None, return_uwfs=False, verbose=False, report=True
+        iter_num_omega_i = 1000, iter_num_omega_til=1000, eps=1e-3,
+        tol = 1e-17, state_idx=None, return_uwfs=False, return_wf_centers=False,
+        verbose=False, report=True
         ):
     """
     Find the maximally localized Wannier functions using the projection method.
@@ -841,31 +842,19 @@ def max_loc_Wan(
     w0 = DFT(psi_max_loc)
 
     if report:
-        print("Starting report:")
-        M1 = k_overlap_mat(lat_vecs, orbs, u_tilde_wan) # [kx, ky, b, m, n]
-        spread, _, _ = spread_recip(lat_vecs, M1, decomp=True)
-        print(rf"Spread after initial projection = {spread[0]}")
-        print(rf"Omega_I after initial projection = {spread[1]}")
-        print(rf"Omega_til after initial projection = {spread[2]}")
-        print()
+        print("Post processing report:")
+        print(" --------------- ")
+        M = k_overlap_mat(lat_vecs, orbs, u_max_loc) # [kx, ky, b, m, n]
+        spread, expc_r, expc_rsq = spread_recip(lat_vecs, M, decomp=True)
+        print(rf"Quadratic spread = {spread[0]}")
+        print(rf"Omega_i = {spread[1]}")
+        print(rf"Omega_tilde = {spread[2]}")
+        print(f"<\\vec{{r}}>_n = {expc_r}")
+        print(f"<r^2>_n = {expc_rsq}")
 
-        # M2 = k_overlap_mat(lat_vecs, orbs, u_til_til_min) # [kx, ky, b, m, n]
-        # spread, _, _ = spread_recip(lat_vecs, M2, decomp=True)
-        # print(rf"Spread after minimizing Omega_I + 2nd proj = {spread[0]}")
-        # print(rf"Omega_I after minimizing Omega_I + 2nd proj = {spread[1]}")
-        # print(rf"Omega_til after minimizing Omega_I + 2nd proj = {spread[2]}")
-        # print()
-
-        M3 = k_overlap_mat(lat_vecs, orbs, u_max_loc) # [kx, ky, b, m, n]
-        spread, expc_rsq, expc_r_sq = spread_recip(lat_vecs, M3, decomp=True)
-        print(rf"Spread = {spread[0]}")
-        print(rf"Omega_I = {spread[1]}")
-        print(rf"Omega_ti = {spread[2]}")
-        print(f"<r^2> = {expc_rsq}")
-        print(f"<r>^2 = {expc_r_sq}")
-
+    ret_pckg = [w0]
     if return_uwfs:
-        return w0, u_max_loc
-
-    else:
-        return w0
+        ret_pckg.append(u_max_loc)
+    if return_wf_centers:
+        ret_pckg.append(expc_r)
+    return ret_pckg

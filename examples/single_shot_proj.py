@@ -73,7 +73,7 @@ plot.plot_Wan(w0, idx, orbs, lat_vecs, title=title, plot_phase=True, plot_decay=
 ######## Spreads ########
 
 ### Real space 
-spread, r_n, rsq_n  = spread_real(model, w0, decomp=True)
+spread, r_n, rsq_n = spread_real(model, w0, decomp=True)
 
 print(f"Real space spread: {spread[0]: .8f}")
 print(f"Real space <r^2> = {np.sum(rsq_n): .8f}")
