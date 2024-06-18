@@ -626,7 +626,6 @@ def find_optimal_subspace(
     Returns:
         states_min: States spanning optimal subspace
     """
-
     if isinstance(inner_states, wf_array):
         shape = inner_states._wfs.shape  # [*nks, idx, orb]
         inner_states = np.array(inner_states._wfs)
@@ -672,41 +671,34 @@ def find_optimal_subspace(
     spread, _, _ = spread_recip(lat_vecs, M, decomp=True)
     omega_I_prev = spread[1]
 
-    # diff = None
     for i in range(iter_num):
+        P_avg = np.sum(w_b * P_nbr_min, axis=-3)
+        Z = outer_states[..., :, :].conj() @ P_avg @ np.transpose(outer_states[..., : ,:], axes=(0,1,3,2))
+        eigvals, eigvecs = np.linalg.eigh(Z)  # [val, idx]
+
         for k_idx in k_idx_arr:
-            P_avg = np.sum(w_b * P_nbr_min[k_idx], axis=0)
-
-            # diagonalizing P_avg in outer_states basis
-            Z = outer_states[k_idx].conj() @ P_avg @ outer_states[k_idx].T
-
-            eigvals, eigvecs = np.linalg.eigh(Z)  # [val, idx]
+            evals, evecs = eigvals[k_idx], eigvecs[k_idx]
             for idx, n in enumerate(
-                np.argsort(eigvals.real)[-dim_subspace:]
+                np.argsort(evals.real)[-dim_subspace:]
             ):  # keep ntfs wfs with highest eigenvalue
                 states_min[k_idx][idx, :] = np.sum(
                     [
-                        eigvecs[i, n] * outer_states[k_idx][i, :]
-                        for i in range(eigvecs.shape[0])
+                        evecs[i, n] * outer_states[k_idx][i, :]
+                        for i in range(evecs.shape[0])
                     ],
                     axis=0,
                 )
 
-            P_new = np.einsum("ni,nj->ij", states_min[k_idx], states_min[k_idx].conj())
-            P_min[k_idx] = alpha * P_new + (1 - alpha) * P_min[k_idx] # for next iteration
-
-            for idx, idx_vec in enumerate(idx_shell[0]):  # nearest neighbors
-                k_nbr_idx = np.array(k_idx) + idx_vec
-                mod_idx = np.mod(k_nbr_idx, nks)
-                state_pbc = states_min[tuple(mod_idx)] * bc_phase[k_idx][idx]
-                P_nbr_min[k_idx][idx, :, :] = np.einsum(
-                    "ni,nj->ij", state_pbc, state_pbc.conj()
-                )
-                Q_nbr_min[k_idx][idx, :, :] = (
-                    np.eye(n_orb) - P_nbr_min[k_idx][idx, :, :]
-                )
-                T_kb[k_idx][idx] = np.trace(P_min[k_idx] @ Q_nbr_min[k_idx][idx, :, :])
-
+        P_new = np.einsum("...ni,...nj->...ij", states_min, states_min.conj())
+        P_min = alpha * P_new + (1 - alpha) * P_min[k_idx] # for next iteration
+        for idx, idx_vec in enumerate(idx_shell[0]):  # nearest neighbors
+            states_pbc = np.roll(states_min, shift=tuple(-idx_vec), axis=(0,1)) * bc_phase[..., idx, np.newaxis,  :]
+            P_nbr_min[..., idx, :, :] = np.einsum(
+                    "...ni, ...nj->...ij", states_pbc, states_pbc.conj()
+                    )
+            Q_nbr_min[..., idx, :, :] = np.eye(n_orb) - P_nbr_min[..., idx, :, :]
+            T_kb[..., idx] = np.trace(P_min[..., :, :] @ Q_nbr_min[..., idx, :, :], axis1=-1, axis2=-2)
+        
         omega_I_new = (1 / Nk) * w_b * np.sum(T_kb)
 
         if omega_I_new > omega_I_prev:
