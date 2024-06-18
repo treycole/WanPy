@@ -1,4 +1,5 @@
 from pythtb import *
+from numpy import sqrt
 
 # used for testing purposes
 
@@ -29,7 +30,7 @@ def chessboard(t0, tprime, delta):
     return model
 
 def Haldane(delta, t, t2):
-    lat=[[1, 0],[0.5, np.sqrt(3)/2]]
+    lat=[[1, 0],[0.5, sqrt(3)/2]]
     orb=[[1/3, 1/3],[2/3, 2/3]]
 
     model = tb_model(2, 2, lat, orb)

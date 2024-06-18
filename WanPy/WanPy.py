@@ -297,12 +297,13 @@ def Wannierize(
     # get Bloch wfs
     if k_mesh is None:  # assume u_wfs is defined over full BZ
         k_mesh = gen_k_mesh(*nks, flat=True, endpoint=False)
-
     psi_wfs = get_bloch_wfs(orbs, u_wfs, k_mesh)
+
     # get tilde states
     psi_tilde = get_psi_tilde(
         psi_wfs, tf_list, state_idx=state_idx, compact_SVD=compact_SVD
     )
+    u_tilde_wan = get_bloch_wfs(orbs, psi_tilde, k_mesh, inverse=True)
 
     # get Wannier functions
     w_0n = DFT(psi_tilde)

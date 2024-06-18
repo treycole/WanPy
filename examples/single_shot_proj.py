@@ -1,5 +1,5 @@
 from pythtb import *
-from WanPy.pythtb_Wannier import *
+from WanPy.WanPy import *
 import WanPy.models as models
 import WanPy.plotting as plot
 

@@ -1,8 +1,8 @@
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from WanPy.pythtb_Wannier import *
-import WanPy.pythtb_Wannier as pythtb_Wannier 
+from WanPy.WanPy import *
+import WanPy.WanPy as WanPy 
 from pythtb import *
 import WanPy.models as models
 import WanPy.plotting as plot
