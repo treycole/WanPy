@@ -3,13 +3,14 @@ from pythtb import *
 from itertools import product
 from itertools import combinations_with_replacement as comb
 from scipy.linalg import expm
+from line_profiler import profile
 
-
+@profile
 def get_recip_lat_vecs(lat_vecs):
     b = 2 * np.pi * np.linalg.inv(lat_vecs).T
     return b
 
-
+@profile
 def get_k_shell(*nks, lat_vecs, N_sh, tol_dp=8, report=False):
     recip_vecs = get_recip_lat_vecs(lat_vecs)
     dk = np.array([recip_vecs[i] / nk for i, nk in enumerate(nks)])
@@ -53,7 +54,7 @@ def get_k_shell(*nks, lat_vecs, N_sh, tol_dp=8, report=False):
 
     return k_shell, idx_shell
 
-
+@profile
 def get_weights(*nks, lat_vecs, N_sh=1, report=False):
     k_shell, _ = get_k_shell(*nks, lat_vecs=lat_vecs, N_sh=N_sh, report=report)
     dim_k = len(nks)
@@ -78,7 +79,7 @@ def get_weights(*nks, lat_vecs, N_sh=1, report=False):
         print(f"Finite difference weights: {w}")
     return w
 
-
+@profile
 def gen_k_mesh(*nks, centered=False, flat=True, endpoint=False):
     """Generate k-mesh in reduced coordinates
 
@@ -100,7 +101,7 @@ def gen_k_mesh(*nks, centered=False, flat=True, endpoint=False):
 
     return mesh if flat else mesh.reshape(*[nk for nk in nks], len(nks))
 
-
+@profile
 def get_orb_phases(orbs, k_vec, inverse=False):
     """
     Introduces e^i{k.tau} factors
@@ -122,7 +123,7 @@ def get_orb_phases(orbs, k_vec, inverse=False):
     wf_phases = np.exp(lam * 1j * 2 * np.pi * per_orb @ k_vec.T, dtype=complex).T
     return wf_phases  # 1D numpy array of dimension norb
 
-
+@profile
 def get_bloch_wfs(orbs, u_wfs, k_mesh, inverse=False):
     """
     Change the cell periodic wfs to Bloch wfs
@@ -157,7 +158,7 @@ def get_bloch_wfs(orbs, u_wfs, k_mesh, inverse=False):
 
     return psi_wfs
 
-
+@profile
 def set_trial_function(tf_list, norb):
     """
     Args:
@@ -193,7 +194,7 @@ def set_trial_function(tf_list, norb):
     # return numpy array containing trial functions
     return tfs  # tfs in order[trial funcs, orbitals]
 
-
+@profile
 def tf_overlap_mat(psi_wfs, tfs, state_idx):
     """
 
@@ -217,7 +218,7 @@ def tf_overlap_mat(psi_wfs, tfs, state_idx):
 
     return A
 
-
+@profile
 def get_psi_tilde(psi_wf, tf_list, state_idx=None, compact_SVD=False):
 
     shape = psi_wf.shape
@@ -241,7 +242,7 @@ def get_psi_tilde(psi_wf, tf_list, state_idx=None, compact_SVD=False):
 
     return psi_tilde
 
-
+@profile
 def SVD(A, full_matrices=False, compact_SVD=False):
     # SVD on last 2 axes by default (preserving k indices)
     V, S, Wh = np.linalg.svd(A, full_matrices=full_matrices)
@@ -255,13 +256,13 @@ def SVD(A, full_matrices=False, compact_SVD=False):
 
     return V, S, Wh
 
-
+@profile
 def DFT(psi_tilde, norm=None):
     dim_k = len(psi_tilde.shape[:-2])
     Rn = np.fft.ifftn(psi_tilde, axes=[i for i in range(dim_k)], norm=norm)
     return Rn
 
-
+@profile
 def Wannierize(
     orbs,
     u_wfs,
@@ -317,6 +318,7 @@ def Wannierize(
 
 
 # TODO: Allow for arbitrary dimensions
+@profile
 def spread_real(lat_vecs, orbs, w0, decomp=False):
     """
     Spread functional computed in real space with Wannier functions
@@ -355,9 +357,7 @@ def spread_real(lat_vecs, orbs, w0, decomp=False):
     for n in range(n_wfs):  # "band" index
         for tx, ty in supercell:  # cells in supercell
             for i, orb in enumerate(orbs):  # values of Wannier function on lattice
-                pos = (orb[0] + tx) * lat_vecs[0] + (orb[1] + ty) * lat_vecs[
-                    1
-                ]  # position
+                pos = (orb[0] + tx) * lat_vecs[0] + (orb[1] + ty) * lat_vecs[1]  # position
                 r = np.sqrt(pos[0] ** 2 + pos[1] ** 2)
 
                 w0n_r = w0[tx, ty, n, i]  # Wannier function
@@ -394,7 +394,7 @@ def spread_real(lat_vecs, orbs, w0, decomp=False):
     else:
         return spread, r_n, rsq_n
 
-
+@profile
 def k_overlap_mat(lat_vecs, orbs, u_wfs):
     """
     Compute the overlap matrix of Bloch eigenstates. Assumes that the last u_wf
@@ -448,7 +448,7 @@ def k_overlap_mat(lat_vecs, orbs, u_wfs):
                     )
     return M
 
-
+@profile
 def spread_recip(lat_vecs, M, decomp=False):
     """
     Args:
@@ -465,48 +465,44 @@ def spread_recip(lat_vecs, M, decomp=False):
     shape = M.shape
     n_states = shape[3]
     nks = M.shape[:-3]
+    k_axes = tuple([i for i in range(len(nks))])
     Nk = np.prod(nks)
-    k_idx_arr = list(product(*[range(nk) for nk in nks]))  # list of all k_indices
 
     # Assumes only one shell for now
     k_shell, _ = get_k_shell(*nks, lat_vecs=lat_vecs, N_sh=1, tol_dp=8, report=False)
     w_b = get_weights(*nks, lat_vecs=lat_vecs, N_sh=1)[0]
-
+    
     r_n = np.zeros((n_states, 2), dtype=complex)  # <\vec{r}>_n
     rsq_n = np.zeros(n_states, dtype=complex)  # <r^2>_n
-    expc_rsq = 0  # <r^2>
-    expc_r_sq = 0  # <\vec{r}>^2
+
     for n in range(n_states):
-        for k in k_idx_arr:
-            for idx, b in enumerate(k_shell[0]):
-                r_n[n, :] += -(1 / Nk) * w_b * b * np.log(M[k][idx, n, n]).imag
-                rsq_n[n] += (
+        for idx, b in enumerate(k_shell[0]):
+            r_n[n, :] += -(1 / Nk) * w_b * b * np.sum(np.log(M[..., idx, n, n]).imag, axis=k_axes)
+            rsq_n[n] += np.sum(
                     (1 / Nk) * w_b
-                    * (1 - abs(M[k][idx, n, n]) ** 2
-                       + np.log(M[k][idx, n, n]).imag ** 2
-                       )
+                    * (1 - abs(M[..., idx, n, n]) ** 2
+                       + np.log(M[..., idx, n, n]).imag ** 2
+                       ), axis=k_axes
                 )
 
-        expc_rsq += rsq_n[n]  # <r^2>
-        expc_r_sq += np.vdot(r_n[n, :], r_n[n, :])  # <\vec{r}>^2
-
+    expc_rsq = np.sum(rsq_n)  # <r^2>
+    expc_r_sq = np.sum([np.vdot(r_n[n, :], r_n[n, :]) for n in range(r_n.shape[0])])  # <\vec{r}>^2
     spread = expc_rsq - expc_r_sq
-
     if decomp:
         Omega_i = 0
         Omega_tilde = 0
-        for k in k_idx_arr:
-            for idx, b in enumerate(k_shell[0]):
-                Omega_i += (1 / Nk) * w_b * n_states
-                for n in range(n_states):
-                    Omega_tilde += (
-                        (1 / Nk) * w_b
-                        * (-np.log(M[k][idx, n, n]).imag - np.vdot(b, r_n[n])) ** 2
-                    )
-                    for m in range(n_states):
-                        Omega_i -= (1 / Nk) * w_b * abs(M[k][idx, m, n]) ** 2
-                        if m != n:
-                            Omega_tilde += (1 / Nk) * w_b * abs(M[k][idx, m, n]) ** 2
+        for idx, b in enumerate(k_shell[0]):
+            Omega_i += w_b * n_states
+            for n in range(n_states):
+                Omega_tilde += np.sum(
+                    (1 / Nk) * w_b
+                    * (-np.log(M[..., idx, n, n]).imag - np.vdot(b, r_n[n])) ** 2, 
+                    axis=k_axes
+                )
+                for m in range(n_states):
+                    Omega_i -= np.sum((1 / Nk) * w_b * abs(M[..., idx, m, n]) ** 2, axis=k_axes)
+                    if m != n:
+                        Omega_tilde += np.sum((1 / Nk) * w_b * abs(M[..., idx, m, n]) ** 2, axis=k_axes)
 
         return [spread, Omega_i, Omega_tilde], r_n, rsq_n
 
@@ -607,7 +603,7 @@ def diag_h_in_subspace(model, eigvecs, k_path, ret_evecs=False):
 
 ####### Maximally Localized WF ############
 
-
+@profile
 def find_optimal_subspace(
     lat_vecs, orbs, outer_states, inner_states, iter_num=100, verbose=False, tol=1e-17
 ):
@@ -780,7 +776,7 @@ def find_optimal_subspace(
 
     return states_min
 
-
+@profile
 def find_min_unitary(lat_vecs, M, eps=1 / 160, iter_num=10, verbose=False, tol=1e-17):
 
     shape = M.shape
@@ -879,7 +875,7 @@ def find_min_unitary(lat_vecs, M, eps=1 / 160, iter_num=10, verbose=False, tol=1
 
     return U, M
 
-
+@profile
 def get_max_loc_uwfs(
     lat_vecs, orbs, u_wfs, eps=1 / 160, iter_num=10, verbose=False, tol=1e-17
 ):
