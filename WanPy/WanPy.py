@@ -4,6 +4,8 @@ from itertools import product
 from itertools import combinations_with_replacement as comb
 from scipy.linalg import expm
 from line_profiler import profile
+import os
+cwd = os.getcwd()
 
 
 def get_recip_lat_vecs(lat_vecs):
@@ -179,6 +181,34 @@ def get_bloch_wfs(orbs, u_wfs, k_mesh, inverse=False):
     psi_wfs = u_wfs * phases[..., np.newaxis, :] 
 
     return psi_wfs
+
+
+def gen_rand_tf_list(n_tfs: int, n_orb: int):
+    def gram_schmidt(vectors):
+        orthogonal_vectors = []
+        for v in vectors:
+            for u in orthogonal_vectors:
+                v -= np.dot(v, u) * u
+            norm = np.linalg.norm(v)
+            if norm > 1e-10:
+                orthogonal_vectors.append(v / norm)
+        return np.array(orthogonal_vectors)
+
+    # Generate three random 4-dimensional vectors
+    vectors = np.random.randn(n_tfs, n_orb)
+    # Apply the Gram-Schmidt process to orthogonalize them
+    orthonorm_vecs = gram_schmidt(vectors)
+
+    tf_list = []
+
+    for n in range(n_tfs):
+        tf = []
+        for orb in range(n_orb):
+            tf.append((orb, orthonorm_vecs[n, orb]))
+
+        tf_list.append(tf)
+
+    return tf_list
 
 
 def set_trial_function(tf_list, norb):
@@ -752,6 +782,7 @@ def find_min_unitary(lat_vecs, M, eps=1 / 160, iter_num=10, verbose=False, tol=1
     # initializing
     spread, _, _ = spread_recip(lat_vecs, M, decomp=True)
     omega_tilde_prev = spread[2]
+    grad_mag_prev = 0
     U[...] = np.eye(num_state, dtype=complex)  # initialize as identity
 
     for i in range(iter_num):
@@ -773,19 +804,20 @@ def find_min_unitary(lat_vecs, M, eps=1 / 160, iter_num=10, verbose=False, tol=1
 
         spread, _, _ = spread_recip(lat_vecs, M, decomp=True)
         omega_tilde = spread[2]
+        grad_mag = np.linalg.norm(np.sum(G, axis=(0,1)))
 
-        if abs(omega_tilde - omega_tilde_prev) <= tol:
-            print("Omega_tilde has converged within tolerance. Breaking the loop")
+        if abs(grad_mag) <= tol:
+            print("Omega_tilde minimization has converged within tolerance. Breaking the loop")
             return U, M
-        if omega_tilde > omega_tilde_prev:
-            print("Warning: Omega_tilde increasing. Decreasing step size by 10%.")
+        if grad_mag_prev > grad_mag and i!=0:
+            print("Warning: Gradient increasing.")
             eps = eps * 0.9
         if verbose:
             print(
-                f"{i} Omega_til = {omega_tilde.real}, Grad mag: {np.linalg.norm(np.sum(G, axis=(0,1)))}"
+                f"{i} Omega_til = {omega_tilde.real}, Grad mag: {grad_mag}"
             )
 
-        omega_tilde_prev = omega_tilde
+        grad_mag_prev = grad_mag
 
     return U, M
 
@@ -831,11 +863,13 @@ def max_loc_Wan(
     iter_num_omega_til=1000,
     eps=1e-3,
     tol=1e-17,
-    state_idx=None,
+    alpha=1,
+    Wan_idxs=None,
     return_uwfs=False,
     return_wf_centers=False,
     verbose=False,
     report=True,
+    save=False, save_name=''
 ):
     """
     Find the maximally localized Wannier functions using the projection method.
@@ -867,7 +901,7 @@ def max_loc_Wan(
     psi_wfs = get_bloch_wfs(orbs, u_wfs, k_mesh)
 
     # Get tilde states from initial projection of trial wfs onto states spanned by the band indices specified
-    psi_tilde = get_psi_tilde(psi_wfs, tf_list, state_idx=state_idx)
+    psi_tilde = get_psi_tilde(psi_wfs, tf_list, state_idx=Wan_idxs)
     u_tilde_wan = get_bloch_wfs(orbs, psi_tilde, k_mesh, inverse=True)
 
     ### minimizing Omega_I via disentanglement
@@ -877,7 +911,7 @@ def max_loc_Wan(
         outer_states,
         u_tilde_wan,
         iter_num=iter_num_omega_i,
-        verbose=verbose,
+        verbose=verbose, alpha=alpha
     )
     psi_til_min = get_bloch_wfs(orbs, util_min_Wan, k_mesh)
     # second projection of trial wfs onto full manifold spanned by psi_tilde
@@ -893,7 +927,7 @@ def max_loc_Wan(
         eps=eps,
         iter_num=iter_num_omega_til,
         verbose=verbose,
-        tol=tol,
+        tol=tol
     )
     psi_max_loc = get_bloch_wfs(orbs, u_max_loc, k_mesh, inverse=False)
 
@@ -910,6 +944,17 @@ def max_loc_Wan(
         print(rf"Omega_tilde = {spread[2]}")
         print(f"<\\vec{{r}}>_n = {expc_r}")
         print(f"<r^2>_n = {expc_rsq}")
+
+    if save:
+        sv_dir = 'data'
+        if not os.path.exists(sv_dir):
+            os.makedirs(sv_dir)
+        sv_prefix = 'W0_max_loc'
+        np.save(f"{sv_dir}/{sv_prefix}_{save_name}", w0)
+        sv_prefix = 'W0_max_loc_cntrs'
+        np.save(f"{sv_dir}/{sv_prefix}_{save_name}", expc_r)
+        sv_prefix = 'u_wfs_max_loc'
+        np.save(f"{sv_dir}/{sv_prefix}_{save_name}", u_max_loc)
 
     ret_pckg = [w0]
     if return_uwfs:
