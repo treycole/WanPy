@@ -195,7 +195,7 @@ def gen_rand_tf_list(n_tfs: int, n_orb: int):
         return np.array(orthogonal_vectors)
 
     # Generate three random 4-dimensional vectors
-    vectors = np.random.randn(n_tfs, n_orb)
+    vectors = abs(np.random.randn(n_tfs, n_orb))
     # Apply the Gram-Schmidt process to orthogonalize them
     orthonorm_vecs = gram_schmidt(vectors)
 
@@ -356,7 +356,7 @@ def Wannierize(
     psi_tilde = get_psi_tilde(
         psi_wfs, tf_list, state_idx=state_idx, compact_SVD=compact_SVD
     )
-    u_tilde_wan = get_bloch_wfs(orbs, psi_tilde, k_mesh, inverse=True)
+    # u_tilde_wan = get_bloch_wfs(orbs, psi_tilde, k_mesh, inverse=True)
 
     # get Wannier functions
     w_0n = DFT(psi_tilde)
@@ -500,7 +500,7 @@ def k_overlap_mat(lat_vecs, orbs, u_wfs):
                     )
     return M
 
-@profile
+
 def spread_recip(lat_vecs, M, decomp=False):
     """
     Args:
@@ -522,24 +522,29 @@ def spread_recip(lat_vecs, M, decomp=False):
 
     w_b, k_shell, _ = get_weights(*nks, lat_vecs=lat_vecs, N_sh=1)
     w_b, k_shell = w_b[0], k_shell[0] # Assume only one shell for now
+
+    log_diag_M_imag = np.log(np.diagonal(M, axis1=-1, axis2=-2)).imag
+    abs_diag_M_sq = abs(np.diagonal(M, axis1=-1, axis2=-2)) ** 2
+
     r_n = -(1 / Nk) * w_b * np.sum(
             np.log(np.diagonal(M, axis1=-1, axis2=-2)).imag, axis=k_axes).T @ k_shell
     rsq_n = (1 / Nk) * w_b * np.sum(
-        (1 - abs(np.diagonal(M, axis1=-1, axis2=-2)) ** 2 + np.log(np.diagonal(M, axis1=-1, axis2=-2)).imag ** 2), 
-        axis=k_axes+tuple([-2]))
-    expc_rsq = np.sum(rsq_n)  # <r^2>
-    expc_r_sq = np.sum([np.vdot(r_n[n, :], r_n[n, :]) for n in range(r_n.shape[0])])  # <\vec{r}>^2
-    spread = expc_rsq - expc_r_sq
+        (1 - abs_diag_M_sq + log_diag_M_imag ** 2), axis=k_axes+tuple([-2]))
+    
+    spread_n = rsq_n - np.array([np.vdot(r_n[n, :], r_n[n, :]) for n in range(r_n.shape[0])])
+    # expc_rsq = np.sum(rsq_n)  # <r^2>
+    # expc_r_sq = np.sum([np.vdot(r_n[n, :], r_n[n, :]) for n in range(r_n.shape[0])])  # <\vec{r}>^2
+    # spread = expc_rsq - expc_r_sq
     if decomp:
         Omega_i = w_b * n_states * k_shell.shape[0] - (1 / Nk) * w_b * np.sum(abs(M) **2)
         Omega_tilde = (1 / Nk) * w_b * ( 
-            np.sum((-np.log(np.diagonal(M, axis1=-1, axis2=-2)).imag - k_shell @ r_n.T)**2) + 
-            np.sum(abs(M)**2) - np.sum( abs(np.diagonal(M, axis1=-1, axis2=-2))**2)
+            np.sum((-log_diag_M_imag - k_shell @ r_n.T)**2) + 
+            np.sum(abs(M)**2) - np.sum(abs_diag_M_sq)
         )
-        return [spread, Omega_i, Omega_tilde], r_n, rsq_n
+        return [spread_n, Omega_i, Omega_tilde], r_n, rsq_n
 
     else:
-        return spread, r_n, rsq_n
+        return spread_n, r_n, rsq_n
 
 
 ###### helper functions #####
@@ -780,15 +785,16 @@ def find_min_unitary(lat_vecs, M, eps=1 / 160, iter_num=10, verbose=False, tol=1
     M = np.copy(M)  # new overlap matrix
 
     # initializing
-    spread, _, _ = spread_recip(lat_vecs, M, decomp=True)
-    omega_tilde_prev = spread[2]
+    # spread, _, _ = spread_recip(lat_vecs, M, decomp=True)
+    # omega_tilde_prev = spread[2]
     grad_mag_prev = 0
     U[...] = np.eye(num_state, dtype=complex)  # initialize as identity
 
     for i in range(iter_num):
+        log_diag_M_imag = np.log(np.diagonal(M, axis1=-1, axis2=-2))
         r_n = -(1 / Nk) * w_b * np.sum(
-            np.log(np.diagonal(M, axis1=-1, axis2=-2)).imag, axis=(0,1)).T @ k_shell[0]
-        q = np.log(np.diagonal(M, axis1=-1, axis2=-2)).imag +  (k_shell[0] @ r_n.T)
+            log_diag_M_imag, axis=(0,1)).T @ k_shell[0]
+        q = log_diag_M_imag + (k_shell[0] @ r_n.T)
         R = np.multiply(M, np.diagonal(M, axis1=-1, axis2=-2)[..., np.newaxis, :].conj())
         T = np.multiply(np.divide(M, np.diagonal(M, axis1=-1, axis2=-2)[..., np.newaxis, :]), q[..., np.newaxis, :])
         A_R = (R - np.transpose(R, axes=(0,1,2,4,3)).conj()) / 2
@@ -867,6 +873,7 @@ def max_loc_Wan(
     Wan_idxs=None,
     return_uwfs=False,
     return_wf_centers=False,
+    return_spread=False,
     verbose=False,
     report=True,
     save=False, save_name=''
@@ -961,4 +968,6 @@ def max_loc_Wan(
         ret_pckg.append(u_max_loc)
     if return_wf_centers:
         ret_pckg.append(expc_r)
+    if return_spread:
+        ret_pckg.append(spread)
     return ret_pckg
