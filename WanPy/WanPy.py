@@ -791,7 +791,7 @@ def find_min_unitary(lat_vecs, M, eps=1 / 160, iter_num=10, verbose=False, tol=1
     U[...] = np.eye(num_state, dtype=complex)  # initialize as identity
 
     for i in range(iter_num):
-        log_diag_M_imag = np.log(np.diagonal(M, axis1=-1, axis2=-2))
+        log_diag_M_imag = np.log(np.diagonal(M, axis1=-1, axis2=-2)).imag
         r_n = -(1 / Nk) * w_b * np.sum(
             log_diag_M_imag, axis=(0,1)).T @ k_shell[0]
         q = log_diag_M_imag + (k_shell[0] @ r_n.T)
