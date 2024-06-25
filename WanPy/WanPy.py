@@ -210,6 +210,34 @@ def gen_rand_tf_list(n_tfs: int, n_orb: int):
     return tf_list
 
 
+def gen_rand_tf_list(n_tfs: int, n_orb: int):
+    def gram_schmidt(vectors):
+        orthogonal_vectors = []
+        for v in vectors:
+            for u in orthogonal_vectors:
+                v -= np.dot(v, u) * u
+            norm = np.linalg.norm(v)
+            if norm > 1e-10:
+                orthogonal_vectors.append(v / norm)
+        return np.array(orthogonal_vectors)
+
+    # Generate three random 4-dimensional vectors
+    vectors = abs(np.random.randn(n_tfs, n_orb))
+    # Apply the Gram-Schmidt process to orthogonalize them
+    orthonorm_vecs = gram_schmidt(vectors)
+
+    tf_list = []
+
+    for n in range(n_tfs):
+        tf = []
+        for orb in range(n_orb):
+            tf.append((orb, orthonorm_vecs[n, orb]))
+
+        tf_list.append(tf)
+
+    return tf_list
+
+
 def set_trial_function(tf_list, norb):
     """
     Args:
@@ -499,7 +527,7 @@ def k_overlap_mat(lat_vecs, orbs, u_wfs):
                     )
     return M
 
-@profile
+
 def spread_recip(lat_vecs, M, decomp=False):
     """
     Args:
@@ -784,8 +812,8 @@ def find_min_unitary(lat_vecs, M, eps=1 / 160, iter_num=10, verbose=False, tol=1
     M = np.copy(M)  # new overlap matrix
 
     # initializing
-    spread, _, _ = spread_recip(lat_vecs, M, decomp=True)
-    omega_tilde_prev = spread[2]
+    # spread, _, _ = spread_recip(lat_vecs, M, decomp=True)
+    # omega_tilde_prev = spread[2]
     grad_mag_prev = 0
     U[...] = np.eye(num_state, dtype=complex)  # initialize as identity
 
@@ -794,10 +822,6 @@ def find_min_unitary(lat_vecs, M, eps=1 / 160, iter_num=10, verbose=False, tol=1
         r_n = -(1 / Nk) * w_b * np.sum(
             log_diag_M_imag, axis=(0,1)).T @ k_shell[0]
         q = log_diag_M_imag + (k_shell[0] @ r_n.T)
-            
-        # r_n = -(1 / Nk) * w_b * np.sum(
-        #     np.log(np.diagonal(M, axis1=-1, axis2=-2)).imag, axis=(0,1)).T @ k_shell[0]
-        # q = np.log(np.diagonal(M, axis1=-1, axis2=-2)).imag +  (k_shell[0] @ r_n.T)
         R = np.multiply(M, np.diagonal(M, axis1=-1, axis2=-2)[..., np.newaxis, :].conj())
         T = np.multiply(np.divide(M, np.diagonal(M, axis1=-1, axis2=-2)[..., np.newaxis, :]), q[..., np.newaxis, :])
         A_R = (R - np.transpose(R, axes=(0,1,2,4,3)).conj()) / 2
@@ -815,16 +839,19 @@ def find_min_unitary(lat_vecs, M, eps=1 / 160, iter_num=10, verbose=False, tol=1
         omega_tilde = spread[2]
         grad_mag = np.linalg.norm(np.sum(G, axis=(0,1)))
 
+        if abs(grad_mag) <= tol:
+            print("Omega_tilde minimization has converged within tolerance. Breaking the loop")
+            return U, M
+        if abs(grad_mag_prev - grad_mag) <= tol and grad_mag > tol:
+            print("Warning: Found local minima. Increasing step size.")
+            eps = eps * 1.1
+        if grad_mag_prev < grad_mag and i!=0:
+            print("Warning: Gradient increasing. Decreasing step size.")
+            eps = eps * 0.9
         if verbose:
             print(
                 f"{i} Omega_til = {omega_tilde.real}, Grad mag: {grad_mag}"
             )
-        if abs(grad_mag) <= tol:
-            print("Omega_tilde minimization has converged within tolerance. Breaking the loop")
-            return U, M
-        if grad_mag_prev < grad_mag and i!=0:
-            print("Warning: Gradient increasing.")
-            # eps = eps * 0.9
 
         grad_mag_prev = grad_mag
 
@@ -937,7 +964,7 @@ def max_loc_Wan(
         eps=eps,
         iter_num=iter_num_omega_til,
         verbose=verbose,
-        tol=tol,
+        tol=tol
     )
     psi_max_loc = get_bloch_wfs(orbs, u_max_loc, k_mesh, inverse=False)
 
