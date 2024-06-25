@@ -4,6 +4,8 @@ from itertools import product
 from itertools import combinations_with_replacement as comb
 from scipy.linalg import expm
 from line_profiler import profile
+import os
+cwd = os.getcwd()
 
 
 def get_recip_lat_vecs(lat_vecs):
@@ -180,6 +182,33 @@ def get_bloch_wfs(orbs, u_wfs, k_mesh, inverse=False):
 
     return psi_wfs
 
+def gen_rand_tf_list(n_tfs: int, n_orb: int):
+    def gram_schmidt(vectors):
+        orthogonal_vectors = []
+        for v in vectors:
+            for u in orthogonal_vectors:
+                v -= np.dot(v, u) * u
+            norm = np.linalg.norm(v)
+            if norm > 1e-10:
+                orthogonal_vectors.append(v / norm)
+        return np.array(orthogonal_vectors)
+
+    # Generate three random 4-dimensional vectors
+    vectors = abs(np.random.randn(n_tfs, n_orb))
+    # Apply the Gram-Schmidt process to orthogonalize them
+    orthonorm_vecs = gram_schmidt(vectors)
+
+    tf_list = []
+
+    for n in range(n_tfs):
+        tf = []
+        for orb in range(n_orb):
+            tf.append((orb, orthonorm_vecs[n, orb]))
+
+        tf_list.append(tf)
+
+    return tf_list
+
 
 def set_trial_function(tf_list, norb):
     """
@@ -326,7 +355,7 @@ def Wannierize(
     psi_tilde = get_psi_tilde(
         psi_wfs, tf_list, state_idx=state_idx, compact_SVD=compact_SVD
     )
-    u_tilde_wan = get_bloch_wfs(orbs, psi_tilde, k_mesh, inverse=True)
+    # u_tilde_wan = get_bloch_wfs(orbs, psi_tilde, k_mesh, inverse=True)
 
     # get Wannier functions
     w_0n = DFT(psi_tilde)
@@ -492,25 +521,30 @@ def spread_recip(lat_vecs, M, decomp=False):
 
     w_b, k_shell, _ = get_weights(*nks, lat_vecs=lat_vecs, N_sh=1)
     w_b, k_shell = w_b[0], k_shell[0] # Assume only one shell for now
+
+    log_diag_M_imag = np.log(np.diagonal(M, axis1=-1, axis2=-2)).imag
+    abs_diag_M_sq = abs(np.diagonal(M, axis1=-1, axis2=-2)) ** 2
+
     r_n = -(1 / Nk) * w_b * np.sum(
             np.log(np.diagonal(M, axis1=-1, axis2=-2)).imag, axis=k_axes).T @ k_shell
     rsq_n = (1 / Nk) * w_b * np.sum(
-        (1 - abs(np.diagonal(M, axis1=-1, axis2=-2)) ** 2 + np.log(np.diagonal(M, axis1=-1, axis2=-2)).imag ** 2), 
-        axis=k_axes+tuple([-2]))
-    expc_rsq = np.sum(rsq_n)  # <r^2>
-    expc_r_sq = np.sum([np.vdot(r_n[n, :], r_n[n, :]) for n in range(r_n.shape[0])])  # <\vec{r}>^2
-    spread = expc_rsq - expc_r_sq
+        (1 - abs_diag_M_sq + log_diag_M_imag ** 2), axis=k_axes+tuple([-2]))
+    
+    spread_n = rsq_n - np.array([np.vdot(r_n[n, :], r_n[n, :]) for n in range(r_n.shape[0])])
+    # expc_rsq = np.sum(rsq_n)  # <r^2>
+    # expc_r_sq = np.sum([np.vdot(r_n[n, :], r_n[n, :]) for n in range(r_n.shape[0])])  # <\vec{r}>^2
+    # spread = expc_rsq - expc_r_sq
     if decomp:
         Omega_i = w_b * n_states * k_shell.shape[0] - (1 / Nk) * w_b * np.sum(abs(M) **2)
         Omega_tilde = (1 / Nk) * w_b * ( 
-            np.sum((-np.log(np.diagonal(M, axis1=-1, axis2=-2)).imag - k_shell @ r_n.T)**2) + 
-            np.sum(abs(M)**2) - np.sum( abs(np.diagonal(M, axis1=-1, axis2=-2))**2)
+            np.sum((-log_diag_M_imag - k_shell @ r_n.T)**2) + 
+            np.sum(abs(M)**2) - np.sum(abs_diag_M_sq)
         )
-        return [spread, Omega_i, Omega_tilde], r_n, rsq_n
+        return [spread_n, Omega_i, Omega_tilde], r_n, rsq_n
 
     else:
-        return spread, r_n, rsq_n
-
+        return spread_n, r_n, rsq_n
+    
 
 ###### helper functions #####
 def get_pbc_phase(orbs, G):
@@ -752,12 +786,18 @@ def find_min_unitary(lat_vecs, M, eps=1 / 160, iter_num=10, verbose=False, tol=1
     # initializing
     spread, _, _ = spread_recip(lat_vecs, M, decomp=True)
     omega_tilde_prev = spread[2]
+    grad_mag_prev = 0
     U[...] = np.eye(num_state, dtype=complex)  # initialize as identity
 
     for i in range(iter_num):
+        log_diag_M_imag = np.log(np.diagonal(M, axis1=-1, axis2=-2)).imag
         r_n = -(1 / Nk) * w_b * np.sum(
-            np.log(np.diagonal(M, axis1=-1, axis2=-2)).imag, axis=(0,1)).T @ k_shell[0]
-        q = np.log(np.diagonal(M, axis1=-1, axis2=-2)).imag +  (k_shell[0] @ r_n.T)
+            log_diag_M_imag, axis=(0,1)).T @ k_shell[0]
+        q = log_diag_M_imag + (k_shell[0] @ r_n.T)
+            
+        # r_n = -(1 / Nk) * w_b * np.sum(
+        #     np.log(np.diagonal(M, axis1=-1, axis2=-2)).imag, axis=(0,1)).T @ k_shell[0]
+        # q = np.log(np.diagonal(M, axis1=-1, axis2=-2)).imag +  (k_shell[0] @ r_n.T)
         R = np.multiply(M, np.diagonal(M, axis1=-1, axis2=-2)[..., np.newaxis, :].conj())
         T = np.multiply(np.divide(M, np.diagonal(M, axis1=-1, axis2=-2)[..., np.newaxis, :]), q[..., np.newaxis, :])
         A_R = (R - np.transpose(R, axes=(0,1,2,4,3)).conj()) / 2
@@ -773,19 +813,20 @@ def find_min_unitary(lat_vecs, M, eps=1 / 160, iter_num=10, verbose=False, tol=1
 
         spread, _, _ = spread_recip(lat_vecs, M, decomp=True)
         omega_tilde = spread[2]
+        grad_mag = np.linalg.norm(np.sum(G, axis=(0,1)))
 
-        if abs(omega_tilde - omega_tilde_prev) <= tol:
-            print("Omega_tilde has converged within tolerance. Breaking the loop")
-            return U, M
-        if omega_tilde > omega_tilde_prev:
-            print("Warning: Omega_tilde increasing. Decreasing step size by 10%.")
-            eps = eps * 0.9
         if verbose:
             print(
-                f"{i} Omega_til = {omega_tilde.real}, Grad mag: {np.linalg.norm(np.sum(G, axis=(0,1)))}"
+                f"{i} Omega_til = {omega_tilde.real}, Grad mag: {grad_mag}"
             )
+        if abs(grad_mag) <= tol:
+            print("Omega_tilde minimization has converged within tolerance. Breaking the loop")
+            return U, M
+        if grad_mag_prev < grad_mag and i!=0:
+            print("Warning: Gradient increasing.")
+            # eps = eps * 0.9
 
-        omega_tilde_prev = omega_tilde
+        grad_mag_prev = grad_mag
 
     return U, M
 
@@ -829,13 +870,16 @@ def max_loc_Wan(
     outer_states,
     iter_num_omega_i=1000,
     iter_num_omega_til=1000,
+    alpha=1,
     eps=1e-3,
     tol=1e-17,
-    state_idx=None,
+    Wan_idxs=None,
     return_uwfs=False,
     return_wf_centers=False,
+    return_spread=False,
     verbose=False,
     report=True,
+    save=False, save_name=''
 ):
     """
     Find the maximally localized Wannier functions using the projection method.
@@ -867,7 +911,7 @@ def max_loc_Wan(
     psi_wfs = get_bloch_wfs(orbs, u_wfs, k_mesh)
 
     # Get tilde states from initial projection of trial wfs onto states spanned by the band indices specified
-    psi_tilde = get_psi_tilde(psi_wfs, tf_list, state_idx=state_idx)
+    psi_tilde = get_psi_tilde(psi_wfs, tf_list, state_idx=Wan_idxs)
     u_tilde_wan = get_bloch_wfs(orbs, psi_tilde, k_mesh, inverse=True)
 
     ### minimizing Omega_I via disentanglement
@@ -877,7 +921,7 @@ def max_loc_Wan(
         outer_states,
         u_tilde_wan,
         iter_num=iter_num_omega_i,
-        verbose=verbose,
+        verbose=verbose, alpha=alpha, tol=tol
     )
     psi_til_min = get_bloch_wfs(orbs, util_min_Wan, k_mesh)
     # second projection of trial wfs onto full manifold spanned by psi_tilde
@@ -899,7 +943,6 @@ def max_loc_Wan(
 
     # Fourier transform Bloch-like states
     w0 = DFT(psi_max_loc)
-
     if report:
         print("Post processing report:")
         print(" --------------- ")
@@ -911,9 +954,22 @@ def max_loc_Wan(
         print(f"<\\vec{{r}}>_n = {expc_r}")
         print(f"<r^2>_n = {expc_rsq}")
 
+    if save:
+        sv_dir = 'data'
+        if not os.path.exists(sv_dir):
+            os.makedirs(sv_dir)
+        sv_prefix = 'W0_max_loc'
+        np.save(f"{sv_dir}/{sv_prefix}_{save_name}", w0)
+        sv_prefix = 'W0_max_loc_cntrs'
+        np.save(f"{sv_dir}/{sv_prefix}_{save_name}", expc_r)
+        sv_prefix = 'u_wfs_max_loc'
+        np.save(f"{sv_dir}/{sv_prefix}_{save_name}", u_max_loc)
+
     ret_pckg = [w0]
     if return_uwfs:
         ret_pckg.append(u_max_loc)
     if return_wf_centers:
         ret_pckg.append(expc_r)
+    if return_spread:
+        ret_pckg.append(spread)
     return ret_pckg
