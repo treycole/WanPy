@@ -815,8 +815,11 @@ def find_min_unitary(lat_vecs, M, eps=1 / 160, iter_num=10, verbose=False, tol=1
         if abs(grad_mag) <= tol:
             print("Omega_tilde minimization has converged within tolerance. Breaking the loop")
             return U, M
+        if abs(grad_mag_prev - grad_mag) <= tol and grad_mag > tol:
+            print("Warning: Found local minima. Increasing step size.")
+            eps = eps * 1.1
         if grad_mag_prev < grad_mag and i!=0:
-            print("Warning: Gradient increasing.")
+            print("Warning: Gradient increasing. Decreasing step size.")
             eps = eps * 0.9
         if verbose:
             print(
