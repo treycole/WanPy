@@ -472,7 +472,6 @@ def k_overlap_mat(lat_vecs, orbs, u_wfs):
         shape = u_wfs.shape  # [*nks, idx, orb]
 
     nks = shape[:-2]
-    k_idx_arr = list(product(*[range(nk) for nk in nks]))  # list of all k_indices
     n_states = shape[-2]
 
     # Assumes only one shell for now
@@ -483,28 +482,11 @@ def k_overlap_mat(lat_vecs, orbs, u_wfs):
     M = np.zeros(
         (*nks, len(idx_shell[0]), n_states, n_states), dtype=complex
     )  # overlap matrix
-    for k_idx in k_idx_arr:
-        for idx, idx_vec in enumerate(idx_shell[0]):  # nearest neighbors
-            k_nbr_idx = np.array(k_idx) + idx_vec
-            # if the translated k-index contains the -1st or last_idx+1 then we crossed the BZ boundary
-            cross_bndry = np.any((k_nbr_idx == -1) | np.logical_or.reduce([k_nbr_idx == nk for nk in nks]))
-            # apply pbc to index
-            mod_idx = np.mod(k_nbr_idx, nks)
-            if cross_bndry:
-                diff = k_nbr_idx - mod_idx
-                G = np.divide(np.array(diff), np.array(nks))
-                bc_phase = np.array(
-                    np.exp(-1j * 2 * np.pi * orbs @ G.T), dtype=complex
-                ).T
-            else:
-                bc_phase = 1
-
-            for n in range(n_states):  # band index right (occupied)
-                for m in range(n_states):  # band index left (occupied)
-                    M[k_idx][idx, m, n] = np.vdot(
-                        u_wfs[k_idx][m, :], u_wfs[tuple(mod_idx)][n, :] * bc_phase
-                    )
+    for idx, idx_vec in enumerate(idx_shell[0]):  # nearest neighbors
+        states_pbc = np.roll(u_wfs, shift=tuple(-idx_vec), axis=(0,1)) * bc_phase[..., idx, np.newaxis,  :]
+        M[..., idx, :, :] = np.einsum("...mj, ...nj -> ...mn", u_wfs.conj(), states_pbc)
     return M
+
 
 def get_Omega_til(M, w_b, k_shell):
     nks = M.shape[:-3]
