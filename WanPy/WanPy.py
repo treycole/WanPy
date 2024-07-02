@@ -1,19 +1,12 @@
 import numpy as np
-from pythtb import *
+from pythtb import wf_array
 from itertools import product
 from itertools import combinations_with_replacement as comb
-from scipy.linalg import expm
-
-from line_profiler import profile
+# from scipy.linalg import expm
+# from scipy.sparse.linalg import eigsh
+# from scipy.sparse.linalg import eigs
 import os
 cwd = os.getcwd()
-
-def exp(M):
-    eigvals, eigvecs = np.linalg.eigh(M)
-    U = np.transpose(eigvecs, axes=(1,0)) # [orb, num_evecs]
-    diagM = (U @ M @ U.conj().T)
-    exp_diagM = np.diag(np.exp(np.diag(diagM)))
-    return U.conj().T @ exp_diagM @ U
 
 
 def get_recip_lat_vecs(lat_vecs):
@@ -218,34 +211,6 @@ def gen_rand_tf_list(n_tfs: int, n_orb: int):
     return tf_list
 
 
-def gen_rand_tf_list(n_tfs: int, n_orb: int):
-    def gram_schmidt(vectors):
-        orthogonal_vectors = []
-        for v in vectors:
-            for u in orthogonal_vectors:
-                v -= np.dot(v, u) * u
-            norm = np.linalg.norm(v)
-            if norm > 1e-10:
-                orthogonal_vectors.append(v / norm)
-        return np.array(orthogonal_vectors)
-
-    # Generate three random 4-dimensional vectors
-    vectors = abs(np.random.randn(n_tfs, n_orb))
-    # Apply the Gram-Schmidt process to orthogonalize them
-    orthonorm_vecs = gram_schmidt(vectors)
-
-    tf_list = []
-
-    for n in range(n_tfs):
-        tf = []
-        for orb in range(n_orb):
-            tf.append((orb, orthonorm_vecs[n, orb]))
-
-        tf_list.append(tf)
-
-    return tf_list
-
-
 def set_trial_function(tf_list, norb):
     """
     Args:
@@ -379,6 +344,11 @@ def Wannierize(
         shape = u_wfs._wfs.shape  # [*nks, idx, orb]
     else:
         shape = u_wfs.shape  # [*nks, idx, orb]
+    # try:
+    #     shape = u_wfs.shape  # [*nks, idx, orb]
+    # except AttributeError:
+    #     shape = u_wfs._wfs.shape  # [*nks, idx, orb]
+    #     u_wfs = u_wfs._wfs
 
     nks = shape[:-2]
 
@@ -715,9 +685,6 @@ def find_optimal_subspace(
     n_orb = shape[-1]
     n_states = shape[-2]
     dim_subspace = n_states
-    k_idx_arr = list(
-        product(*[range(nk) for nk in nks])
-    )  # all pairwise combinations of k_indices
    
     # Assumes only one shell for now
     w_b, _, idx_shell = get_weights(*nks, lat_vecs=lat_vecs, N_sh=1)
@@ -751,15 +718,11 @@ def find_optimal_subspace(
         P_avg = np.sum(w_b[0] * P_nbr_min, axis=-3)
         Z = outer_states[..., :, :].conj() @ P_avg @ np.transpose(outer_states[..., : ,:], axes=(0,1,3,2))
 
-        eigvals, eigvecs = np.linalg.eigh(Z)  # [val, idx]
-
-        for k_idx in k_idx_arr:
-            evals, evecs = eigvals[tuple(k_idx)], eigvecs[tuple(k_idx)]
-            top_indices = np.argsort(evals.real)[-dim_subspace:]
-            states_min[tuple(k_idx)] = np.einsum('ij,ik->jk', evecs[:, top_indices], outer_states[tuple(k_idx)])
+        _, eigvecs = np.linalg.eigh(Z)  # [val, idx]
+        states_min = np.einsum('...ij, ...ik->...jk', eigvecs[..., -dim_subspace:], outer_states)
 
         P_new = np.einsum("...ni,...nj->...ij", states_min, states_min.conj())
-        P_min = alpha * P_new + (1 - alpha) * P_min[k_idx] # for next iteration
+        P_min = alpha * P_new + (1 - alpha) * P_min # for next iteration
         
         for idx, idx_vec in enumerate(idx_shell[0]):  # nearest neighbors
             states_pbc = np.roll(states_min, shift=tuple(-idx_vec), axis=(0,1)) * bc_phase[..., idx, np.newaxis,  :]
@@ -785,6 +748,7 @@ def find_optimal_subspace(
 
     return states_min
 
+
 def mat_exp(M):
     eigvals, eigvecs = np.linalg.eig(M)
     U = eigvecs
@@ -797,7 +761,26 @@ def mat_exp(M):
     expM = np.einsum('...ij,...jk->...ik', U, np.multiply(U_inv, exp_diagM[..., :, np.newaxis]))
     return expM
 
-def find_min_unitary(lat_vecs, M, eps=1 / 160, iter_num=10, verbose=False, tol=1e-17):
+class AdamOptimizer:
+    def __init__(self, shape, lr=1e-3, beta1=0.9, beta2=0.999, eps=1e-8):
+        self.lr = lr
+        self.beta1 = beta1
+        self.beta2 = beta2
+        self.eps = eps
+        self.m = np.zeros(shape, dtype=np.complex128)
+        self.v = np.zeros(shape, dtype=np.complex128)
+        self.t = 0
+
+    def update(self, grads):
+        self.t += 1
+        self.m = self.beta1 * self.m + (1 - self.beta1) * grads
+        self.v = self.beta2 * self.v + (1 - self.beta2) * (grads ** 2)
+        m_hat = self.m / (1 - self.beta1 ** self.t)
+        v_hat = self.v / (1 - self.beta2 ** self.t)
+        update = self.lr * m_hat / (np.sqrt(v_hat) + self.eps)
+        return update
+
+def find_min_unitary(u_wfs, lat_vecs, orbs, eps=1 / 160, iter_num=10, verbose=False, tol=1e-12):
     """
     Finds the unitary that minimizing the gauge dependent part of the spread. 
 
@@ -815,7 +798,7 @@ def find_min_unitary(lat_vecs, M, eps=1 / 160, iter_num=10, verbose=False, tol=1
         M: The rotated overlap matrix
     
     """
-
+    M = k_overlap_mat(lat_vecs, orbs, u_wfs)  # [kx, ky, b, m, n]
     shape = M.shape
     nks = shape[:-3]
     # dim_k = len(nks)
@@ -827,17 +810,14 @@ def find_min_unitary(lat_vecs, M, eps=1 / 160, iter_num=10, verbose=False, tol=1
     w_b, k_shell = w_b[0], k_shell[0]
 
     U = np.zeros((*nks, num_state, num_state), dtype=complex)  # unitary transformation
-    U2 = np.zeros((*nks, num_state, num_state), dtype=complex)  # unitary transformation
+    U[...] = np.eye(num_state, dtype=complex)  # initialize as identity
     M0 = np.copy(M)  # initial overlap matrix
     M = np.copy(M)  # new overlap matrix
 
     # initializing
-    # spread, _, _ = spread_recip(lat_vecs, M, decomp=True)
-    # omega_tilde_prev = spread[2]
+    # optimizer = AdamOptimizer(U.shape, lr=eps)
     grad_mag_prev = 0
-    U[...] = np.eye(num_state, dtype=complex)  # initialize as identity
-    U2[...] = np.eye(num_state, dtype=complex)  # initialize as identity
-
+    eta = 1
     for i in range(iter_num):
         log_diag_M_imag = np.log(np.diagonal(M, axis1=-1, axis2=-2)).imag
         r_n = -(1 / Nk) * w_b * np.sum(
@@ -848,7 +828,8 @@ def find_min_unitary(lat_vecs, M, eps=1 / 160, iter_num=10, verbose=False, tol=1
         A_R = (R - np.transpose(R, axes=(0,1,2,4,3)).conj()) / 2
         S_T = (T + np.transpose(T, axes=(0,1,2,4,3)).conj()) / (2j)
         G = 4 * w_b * np.sum(A_R - S_T, axis=-3)
-        U = np.einsum("...ij, ...jk -> ...ik", U, mat_exp(eps * G))
+        # G = optimizer.update(G)
+        U = np.einsum("...ij, ...jk -> ...ik", U, mat_exp(eta * eps * G))
 
         for idx, idx_vec in enumerate(idx_shell[0]):
             M[..., idx, :, :] = (
@@ -861,52 +842,32 @@ def find_min_unitary(lat_vecs, M, eps=1 / 160, iter_num=10, verbose=False, tol=1
         if abs(grad_mag) <= tol:
             print("Omega_tilde minimization has converged within tolerance. Breaking the loop")
             return U, M
-        if abs(grad_mag_prev - grad_mag) <= tol and grad_mag > tol:
-            print("Warning: Found local minima. Increasing step size.")
-            eps = eps * 1.1
         if grad_mag_prev < grad_mag and i!=0:
-            print("Warning: Gradient increasing. Decreasing step size.")
-            eps = eps * 0.9
+            print("Warning: Gradient increasing.")
+            # # eta *= 0.9
+            # scale = np.amax(U)
+            # pert = np.random.normal(scale=scale*1e-3, size=U.shape) + 1j * np.random.normal(scale=scale*1e-3, size=U.shape)
+            # pert = (pert + pert.swapaxes(-1, -2).conj())/2j
+            # U = np.einsum("...ij, ...jk -> ...ik", U, mat_exp(pert))  # Perturb U to escape local minima
+        if abs(grad_mag_prev - grad_mag) <= tol:
+            print("Warning: Found local minima.")
+        #     scale = np.amax(U)
+        #     pert = np.random.normal(scale=scale*1e-3, size=U.shape)
+        #     pert = (pert + pert.swapaxes(-1, -2).conj())/2j
+        #     U = np.einsum("...ij, ...jk -> ...ik", U, mat_exp(pert))  # Perturb U to escape local minima
+        
+        # eta = max(eta * 0.99, 0.1)  # Decay eta but keep it above a threshold
         if verbose:
             omega_tilde = get_Omega_til(M, w_b, k_shell)
             print(
                 f"{i} Omega_til = {omega_tilde.real}, Grad mag: {grad_mag}"
             )
+       
 
         grad_mag_prev = grad_mag
 
-    return U, M
-
-
-def get_max_loc_uwfs(
-    lat_vecs, orbs, u_wfs, eps=1 / 160, iter_num=10, verbose=False, tol=1e-17
-):
-    """
-    Gets the rotated Bloch states that have a smoothened gauge.
-    
-    """
-
-    if isinstance(u_wfs, wf_array):
-        shape = u_wfs._wfs.shape  # [*nks, idx, orb]
-    else:
-        shape = u_wfs.shape  # [*nks, idx, orb]
-    nks = shape[:-2]  # tuple defining number of k points in BZ
-    k_idx_arr = list(
-        product(*[range(nk) for nk in nks])
-    )  # all pairwise combinations of k_indices
-
-    ### minimizing Omega_tilde
-    M = k_overlap_mat(lat_vecs, orbs, u_wfs)  # [kx, ky, b, m, n]
-    U, _ = find_min_unitary(
-        lat_vecs, M, iter_num=iter_num, eps=eps, verbose=verbose, tol=tol
-    )
-    u_max_loc = np.zeros(shape, dtype=complex)
-    for k in k_idx_arr:
-        for i in range(u_wfs.shape[-2]):
-            for j in range(u_wfs.shape[-2]):
-                u_max_loc[k][i, :] += U[k][j, i] * u_wfs[k][j, :]
-
-    return u_max_loc
+    u_max_loc = np.einsum('...ji, ...jm -> ...im', U, u_wfs)
+    return u_max_loc, U
 
 
 def max_loc_Wan(
@@ -919,7 +880,7 @@ def max_loc_Wan(
     iter_num_omega_til=1000,
     alpha=1,
     eps=1e-3,
-    tol=1e-17,
+    tol=1e-10,
     Wan_idxs=None,
     return_uwfs=False,
     return_wf_centers=False,
@@ -961,7 +922,7 @@ def max_loc_Wan(
     psi_tilde = get_psi_tilde(psi_wfs, tf_list, state_idx=Wan_idxs)
     u_tilde_wan = get_bloch_wfs(orbs, psi_tilde, k_mesh, inverse=True)
 
-    ### minimizing Omega_I via disentanglement
+    # Minimizing Omega_I via disentanglement
     util_min_Wan = find_optimal_subspace(
         lat_vecs,
         orbs,
@@ -971,21 +932,15 @@ def max_loc_Wan(
         verbose=verbose, alpha=alpha, tol=tol
     )
     psi_til_min = get_bloch_wfs(orbs, util_min_Wan, k_mesh)
-    # second projection of trial wfs onto full manifold spanned by psi_tilde
+
+    # Second projection of trial wfs onto full manifold spanned by psi_tilde
     psi_til_til_min = get_psi_tilde(
         psi_til_min, tf_list, state_idx=list(range(psi_til_min.shape[2]))
     )
     u_til_til_min = get_bloch_wfs(orbs, psi_til_til_min, k_mesh, inverse=True)
 
-    u_max_loc = get_max_loc_uwfs(
-        lat_vecs,
-        orbs,
-        u_til_til_min,
-        eps=eps,
-        iter_num=iter_num_omega_til,
-        verbose=verbose,
-        tol=tol
-    )
+    # Optimal gauge selection
+    u_max_loc, _ = find_min_unitary(u_til_til_min, lat_vecs, orbs, eps=eps, iter_num=iter_num_omega_til, verbose=verbose, tol=tol)
     psi_max_loc = get_bloch_wfs(orbs, u_max_loc, k_mesh, inverse=False)
 
     # Fourier transform Bloch-like states
