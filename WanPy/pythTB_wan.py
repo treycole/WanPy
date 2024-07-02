@@ -246,7 +246,6 @@ class Bloch():
 
         return bc_phase
     
-    
     def k_overlap_mat(self):
         """
         Compute the overlap matrix of Bloch eigenstates. Assumes that the last u_wf
@@ -260,7 +259,7 @@ class Bloch():
         Returns:
             M (np.array): overlap matrix
         """
-        
+
         # Assumes only one shell for now
         _, idx_shell = self.K_mesh.get_k_shell(N_sh=1, tol_dp=8, report=False)
         bc_phase = self.get_boundary_phase(idx_shell)
@@ -269,29 +268,11 @@ class Bloch():
         M = np.zeros(
             (*self.K_mesh._nks, len(idx_shell[0]), self._n_states, self._n_states), dtype=complex
         )  # overlap matrix
-        for k_idx in self.K_mesh._idx_arr:
-            for idx, idx_vec in enumerate(idx_shell[0]):  # nearest neighbors
-                k_nbr_idx = np.array(k_idx) + idx_vec
-                # if the translated k-index contains the -1st or last_idx+1 then we crossed the BZ boundary
-                cross_bndry = np.any((k_nbr_idx == -1) | np.logical_or.reduce([k_nbr_idx == nk for nk in self.K_mesh._nks]))
-                # apply pbc to index
-                mod_idx = np.mod(k_nbr_idx, self.K_mesh._nks)
-                if cross_bndry:
-                    diff = k_nbr_idx - mod_idx
-                    G = np.divide(np.array(diff), np.array(self.K_mesh._nks))
-                    bc_phase = np.array(
-                        np.exp(-1j * 2 * np.pi * self.Lattice._orbs @ G.T), dtype=complex
-                    ).T
-                else:
-                    bc_phase = 1
-
-                for n in range(self._n_states):  # band index right (occupied)
-                    for m in range(self._n_states):  # band index left (occupied)
-                        M[k_idx][idx, m, n] = np.vdot(
-                            self._u_wfs[k_idx][m, :], self._u_wfs[tuple(mod_idx)][n, :] * bc_phase
-                        )
+        for idx, idx_vec in enumerate(idx_shell[0]):  # nearest neighbors
+            states_pbc = np.roll(self._u_wfs, shift=tuple(-idx_vec), axis=(0,1)) * bc_phase[..., idx, np.newaxis,  :]
+            M[..., idx, :, :] = np.einsum("...mj, ...nj -> ...mn", self._u_wfs.conj(), states_pbc)
         return M
-
+    
 
 class Wannier():
     def __init__(
