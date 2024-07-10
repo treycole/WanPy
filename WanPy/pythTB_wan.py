@@ -276,30 +276,18 @@ class Bloch():
 
 class Wannier():
     def __init__(
-            self, model: tb_model, tf_list: list | str, nks: list,
-            state_idx: list = None, n_tfs: int | None = None,  
+            self, model: tb_model, nks: list  
             ):
         self._model = model
         self._nks = nks
+
         self.Lattice = Lattice(model)
         self.K_mesh = K_mesh(model, *nks)
+
         self.energy_eigstates = Bloch(model, *nks)
         self.energy_eigstates.solve_model()
         self.tilde_states = Bloch(model, *nks)
 
-        self.tf_list = tf_list
-        if tf_list == "random":
-            assert n_tfs is not None
-            tf_list = self.gen_rand_tf_list(n_tfs)
-        self.twfs = self.get_trial_wfs(tf_list)
-
-        if state_idx is None:  # assume we are Wannierizing occupied bands at half-filling
-            n_occ = int(self.energy_eigstates._n_states / 2)  # assuming half filled
-            state_idx = list(range(0, n_occ))
-
-        psi_tilde = self.get_psi_tilde(self.energy_eigstates._psi_wfs, self.twfs, state_idx=state_idx)
-        self.tilde_states.set_wfs(psi_tilde, cell_periodic=False)
-        self.WFs = self.Wannierize()
 
     def gen_rand_tf_list(self, n_tfs: int):
         def gram_schmidt(vectors):
@@ -314,7 +302,7 @@ class Wannier():
 
         # Generate three random 4-dimensional vectors
         vectors = abs(np.random.randn(n_tfs, self.Lattice._n_orb))
-        # Apply the Gram-Schmidt process to orthogonalize them
+        # Apply Gram-Schmidt to orthogonalize them
         orthonorm_vecs = gram_schmidt(vectors)
 
         tf_list = []
@@ -366,8 +354,6 @@ class Wannier():
             psi_wfs (np.array): Bloch eigenstates
             tfs (np.array): trial wfs
             state_idx (list): band indices to form overlap matrix with
-            switch_rep (bool, optional): For testing. Defaults to False.
-            tfs_swap (np.array, optional): For testing. Defaults to None.
 
         Returns:
             A (np.array): overlap matrix
@@ -381,10 +367,9 @@ class Wannier():
 
         return A
     
-    def SVD(self, A, full_matrices=False, compact_SVD=False):
-        # SVD on last 2 axes by default (preserving k indices)
-        V, S, Wh = np.linalg.svd(A, full_matrices=full_matrices)
-
+    
+    def get_psi_tilde(self, psi_wfs, tfs, state_idx=None, compact_SVD=False):
+        A = self.tf_overlap_mat(psi_wfs, tfs, state_idx=state_idx)
         # TODO: Test this method
         if compact_SVD: 
             V, S, Wh = np.linalg.svd(A, full_matrices=True)
@@ -392,11 +377,7 @@ class Wannier():
             S = S[..., :-1]
             Wh = Wh[..., :-1, :]
 
-        return V, S, Wh
-    
-    def get_psi_tilde(self, psi_wfs, tfs, state_idx=None, compact_SVD=False):
-        A = self.tf_overlap_mat(psi_wfs, tfs, state_idx=state_idx)
-        V, _, Wh = self.SVD(A, full_matrices=False, compact_SVD=compact_SVD)
+        V, S, Wh = np.linalg.svd(A, full_matrices=False)
 
         # swap only last two indices in transpose (ignore k indices)
         # slice psi_wf to keep only occupied bands
@@ -407,31 +388,42 @@ class Wannier():
         return psi_tilde
     
     
-    def DFT(self, psi_wfs, norm=None):
-        dim_k = len(psi_wfs.shape[:-2])
-        Rn = np.fft.ifftn(psi_wfs, axes=[i for i in range(dim_k)], norm=norm)
-        return Rn
-    
-    
-    def Wannierize(self):
+    def Wannierize(self, tf_list: list, band_idxs: list | None =None):
         """
         Obtains Wannier functions cenetered in home unit cell.
 
         Args:
-            tf_list (list): list of sites and amplitudes of trial wfs
-            n_occ (int): number of occupied states to Wannierize from
-
-            compact_SVD (bool, optional): For testing purposes. Defaults to False.
-            switch_rep (bool, optional): For testing purposes. Defaults to False.
-            tfs_swap (list, optional): For testing purposes. Defaults to None.
+            tf_list (list): List of tuples with sites and weights. Can be un-normalized. 
+            band_idxs (list | None): Band indices to Wannierize. Defaults to occupied bands (lower half).
 
         Returns:
             w_0n (np.array): Wannier functions in home unit cell
         """
-        # get Wannier functions
-        w_0n = self.DFT(self.tilde_states._psi_wfs)
-        return w_0n
-    
+
+        self.tf_list = tf_list
+        if tf_list[0] == "random":
+            n_tfs = tf_list[1]
+            tf_list = self.gen_rand_tf_list(n_tfs)
+        self.trial_wfs = self.get_trial_wfs(tf_list)
+
+        if band_idxs is None:  # assume we are Wannierizing occupied bands at half-filling
+            n_occ = int(self.energy_eigstates._n_states / 2)  # assuming half filled
+            band_idxs = list(range(0, n_occ))
+
+        psi_tilde = self.get_psi_tilde(self.energy_eigstates._psi_wfs, self.trial_wfs, state_idx=band_idxs)
+        self.tilde_states.set_wfs(psi_tilde, cell_periodic=False)
+
+        psi_wfs = self.tilde_states._psi_wfs
+        dim_k = len(psi_wfs.shape[:-2])
+        # DFT
+        self.WFs = np.fft.ifftn(psi_wfs, axes=[i for i in range(dim_k)], norm=None)
+
+        spread = self.spread_recip(decomp=True)
+        self.spread = spread[0][0]
+        self.omega_i = spread[0][1]
+        self.omega_til = spread[0][2]
+        self.centers = spread[1]
+
     
     # TODO: Allow for arbitrary dimensions and optimize
     def spread_real(self, decomp=False):
@@ -439,15 +431,14 @@ class Wannier():
         Spread functional computed in real space with Wannier functions
 
         Args:
-            w0 (np.array): Wannier functions
             decomp (boolean): whether to separate gauge (in)variant parts of spread
 
         Returns:
             Omega: the spread functional
             Omega_inv: (optional) the gauge invariant part of the spread
             Omega_tilde: (optional) the gauge dependent part of the spread
-            expc_rsq: \sum_n <r^2>_{n}
-            expc_r_sq: \sum_n <\vec{r}>_{n}^2
+            expc_rsq: <r^2>_{n}
+            expc_r_sq: <\vec{r}>_{n}^2
         """
         w0 = self.WFs
         # assuming 2D for now
@@ -577,7 +568,7 @@ class Wannier():
      ####### Maximally Localized WF ############
 
     def find_optimal_subspace(
-        self, outer_states, inner_states, iter_num=100, verbose=False, tol=1e-17, alpha=1
+        self, outer_states, inner_states, iter_num=100, verbose=False, tol=1e-10, alpha=1
     ):
         nks = self._nks 
         Nk = np.prod(nks)
@@ -590,7 +581,7 @@ class Wannier():
         num_nnbrs = len(idx_shell[0])
         bc_phase = self.tilde_states.get_boundary_phase(idx_shell=idx_shell)
 
-        P = np.einsum("...ni, ...nj->...ij", inner_states, inner_states.conj())
+        P = np.einsum("...ni, ...nj -> ...ij", inner_states, inner_states.conj())
 
         # Projector on initial subspace at each k (for pbc of neighboring spaces)
         P_nbr = np.zeros((*nks, num_nnbrs, n_orb, n_orb), dtype=complex)
@@ -600,7 +591,7 @@ class Wannier():
         for idx, idx_vec in enumerate(idx_shell[0]):  # nearest neighbors
             states_pbc = np.roll(inner_states, shift=tuple(-idx_vec), axis=(0,1)) * bc_phase[..., idx, np.newaxis,  :]
             P_nbr[..., idx, :, :] = np.einsum(
-                    "...ni, ...nj->...ij", states_pbc, states_pbc.conj()
+                    "...ni, ...nj -> ...ij", states_pbc, states_pbc.conj()
                     )
             Q_nbr[..., idx, :, :] = np.eye(n_orb) - P_nbr[..., idx, :, :]
             T_kb[..., idx] = np.trace(P[..., :, :] @ Q_nbr[..., idx, :, :], axis1=-1, axis2=-2)
@@ -655,11 +646,11 @@ class Wannier():
         # Diagonal matrix of the exponentials of the eigenvalues
         exp_diagM = np.exp(eigvals)
         # Construct the matrix exponential
-        expM = np.einsum('...ij,...jk->...ik', U, np.multiply(U_inv, exp_diagM[..., :, np.newaxis]))
+        expM = np.einsum('...ij, ...jk -> ...ik', U, np.multiply(U_inv, exp_diagM[..., :, np.newaxis]))
         return expM
     
     
-    def find_min_unitary(self, eps=1 / 160, iter_num=10, verbose=False, tol=1e-12):
+    def find_min_unitary(self, eps=1 / 160, iter_num=10, verbose=False, tol=1e-10):
         """
         Finds the unitary that minimizing the gauge dependent part of the spread. 
 
@@ -719,19 +710,8 @@ class Wannier():
                 return u_max_loc, U
             if grad_mag_prev < grad_mag and i!=0:
                 print("Warning: Gradient increasing.")
-                # # eta *= 0.9
-                # scale = np.amax(U)
-                # pert = np.random.normal(scale=scale*1e-3, size=U.shape) + 1j * np.random.normal(scale=scale*1e-3, size=U.shape)
-                # pert = (pert + pert.swapaxes(-1, -2).conj())/2j
-                # U = np.einsum("...ij, ...jk -> ...ik", U, mat_exp(pert))  # Perturb U to escape local minima
             if abs(grad_mag_prev - grad_mag) <= tol:
                 print("Warning: Found local minima.")
-            #     scale = np.amax(U)
-            #     pert = np.random.normal(scale=scale*1e-3, size=U.shape)
-            #     pert = (pert + pert.swapaxes(-1, -2).conj())/2j
-            #     U = np.einsum("...ij, ...jk -> ...ik", U, mat_exp(pert))  # Perturb U to escape local minima
-            
-            # eta = max(eta * 0.99, 0.1)  # Decay eta but keep it above a threshold
             if verbose:
                 omega_tilde = self._get_Omega_til(M, w_b, k_shell)
                 print(
@@ -744,39 +724,33 @@ class Wannier():
 
     def max_loc(
         self,
-        outer_state_idxs,
+        outer_state_idxs="occupied",
         iter_num_omega_i=1000,
         iter_num_omega_til=1000,
         eps=1e-3,
         tol=1e-10,
         alpha=1,
-        Wan_idxs=None,
-        return_uwfs=False,
-        return_wf_centers=False,
-        return_spread=False,
         verbose=False,
-        report=True,
         save=False, save_name=''
     ):
         """
         Find the maximally localized Wannier functions using the projection method.
 
         Args:
-            
-            outer_states(np.ndarray): Disentanglement manifold 
-            state_idx (list | None): Specifying the band indices of u_wfs to Wannierize via projection.
-                By default, will assume half filled insulator and Wannierize the lower
-                half of the bands.
-            return_uwfs(bool): Whether to return the Bloch states corresponding to maximally localized 
-                Wannier functions
-            return_wf_centers(bool): Whether to return the positions of the Wannier function centers
-            verbose(bool): Whether to print spread during minimization
-            report(bool): Whether to print the final spread and Wannier centers
+            outer_states_idxs(list | str): Band indices for the disentanglement manifold. If "occupied", 
+                will use the occupied manifold. Defaults to "occupied".
+            verbose(bool): Whether to print spread during minimization.
 
         """
 
-        # Minimizing Omega_I via disentanglement
+        # slicing the disentanglement manifold
+        if outer_state_idxs == "occupied":
+            n_occ = int(self.energy_eigstates._n_states / 2)  # assuming half filled
+            outer_state_idxs = list(range(n_occ))
+
         outer_states = self.energy_eigstates._u_wfs[..., outer_state_idxs, :]
+
+        # Minimizing Omega_I via disentanglement
         util_min_Wan = self.find_optimal_subspace(
             outer_states,
             self.tilde_states._u_wfs,
@@ -787,7 +761,7 @@ class Wannier():
 
         # Second projection
         psi_til_til_min = self.get_psi_tilde(
-            self.tilde_states._psi_wfs, self.twfs, state_idx=list(range(self.tilde_states._psi_wfs.shape[2]))
+            self.tilde_states._psi_wfs, self.trial_wfs, state_idx=list(range(self.tilde_states._psi_wfs.shape[2]))
         )
         self.tilde_states.set_wfs(psi_til_til_min, cell_periodic=False)
 
@@ -796,18 +770,16 @@ class Wannier():
         self.tilde_states.set_wfs(u_max_loc)
 
         # Fourier transform Bloch-like states
-        self.WFs = self.DFT(self.tilde_states._psi_wfs)
+        psi_wfs = self.tilde_states._psi_wfs
+        dim_k = len(psi_wfs.shape[:-2])
+        # DFT
+        self.WFs = np.fft.ifftn(psi_wfs, axes=[i for i in range(dim_k)], norm=None)
 
-        # if report:
-        #     print("Post processing report:")
-        #     print(" --------------- ")
-        #     M = k_overlap_mat(lat_vecs, orbs, u_max_loc)  # [kx, ky, b, m, n]
-        #     spread, expc_r, expc_rsq = spread_recip(lat_vecs, M, decomp=True)
-        #     print(rf"Quadratic spread = {spread[0]}")
-        #     print(rf"Omega_i = {spread[1]}")
-        #     print(rf"Omega_tilde = {spread[2]}")
-        #     print(f"<\\vec{{r}}>_n = {expc_r}")
-        #     print(f"<r^2>_n = {expc_rsq}")
+        spread = self.spread_recip(decomp=True)
+        self.spread = spread[0][0]
+        self.omega_i = spread[0][1]
+        self.omega_til = spread[0][2]
+        self.centers = spread[1]
 
         # if save:
         #     sv_dir = 'data'
@@ -828,6 +800,16 @@ class Wannier():
         # if return_spread:
         #     ret_pckg.append(spread)
         # return ret_pckg
+
+    def report(self):
+        assert hasattr(self, 'WFs'), "First need to set Wannier functions"
+        print("Wannier function report:")
+        print(" --------------- ")
+        print(rf"Quadratic spread = {self.spread}")
+        print(rf"Omega_i = {self.omega_i}")
+        print(rf"Omega_tilde = {self.omega_til}")
+        print(f"Wannier centers = {self.centers}")
+
 
     def plot(
         self, Wan_idx, plot_phase=False, plot_decay=False,

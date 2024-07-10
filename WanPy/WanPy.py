@@ -813,17 +813,19 @@ def find_min_unitary(u_wfs, lat_vecs, orbs, eps=1 / 160, iter_num=10, verbose=Fa
         # G = optimizer.update(G)
         U = np.einsum("...ij, ...jk -> ...ik", U, mat_exp(eta * eps * G))
 
+        U_conj_trans = np.transpose(U, axes=(0,1,3,2)).conj()
         for idx, idx_vec in enumerate(idx_shell[0]):
+            U_shifted = np.roll(U, shift=tuple(-idx_vec), axis=(0,1))
             M[..., idx, :, :] = (
-                np.transpose(U, axes=(0,1,3,2)).conj()[..., :, :] @  M0[..., idx, :, :] 
-                                @ np.roll(U, shift=tuple(-idx_vec), axis=(0,1))[..., :, :]
-                                )
+                U_conj_trans @  M0[..., idx, :, :]  @ U_shifted
+                )
 
         grad_mag = np.linalg.norm(np.sum(G, axis=(0,1)))
 
         if abs(grad_mag) <= tol:
             print("Omega_tilde minimization has converged within tolerance. Breaking the loop")
-            return U, M
+            u_max_loc = np.einsum('...ji, ...jm -> ...im', U, u_wfs)
+            return u_max_loc, U
         if grad_mag_prev < grad_mag and i!=0:
             print("Warning: Gradient increasing.")
             # # eta *= 0.9
@@ -845,7 +847,6 @@ def find_min_unitary(u_wfs, lat_vecs, orbs, eps=1 / 160, iter_num=10, verbose=Fa
                 f"{i} Omega_til = {omega_tilde.real}, Grad mag: {grad_mag}"
             )
        
-
         grad_mag_prev = grad_mag
 
     u_max_loc = np.einsum('...ji, ...jm -> ...im', U, u_wfs)
@@ -927,11 +928,13 @@ def max_loc_Wan(
 
     # Fourier transform Bloch-like states
     w0 = DFT(psi_max_loc)
+
+    M = k_overlap_mat(lat_vecs, orbs, u_max_loc)  # [kx, ky, b, m, n]
+    spread, expc_r, expc_rsq = spread_recip(lat_vecs, M, decomp=True)
+
     if report:
         print("Post processing report:")
         print(" --------------- ")
-        M = k_overlap_mat(lat_vecs, orbs, u_max_loc)  # [kx, ky, b, m, n]
-        spread, expc_r, expc_rsq = spread_recip(lat_vecs, M, decomp=True)
         print(rf"Quadratic spread = {spread[0]}")
         print(rf"Omega_i = {spread[1]}")
         print(rf"Omega_tilde = {spread[2]}")
