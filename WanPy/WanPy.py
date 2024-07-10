@@ -6,7 +6,7 @@ from itertools import combinations_with_replacement as comb
 # from scipy.sparse.linalg import eigsh
 # from scipy.sparse.linalg import eigs
 import os
-cwd = os.getcwd()
+cwd = os.getcwd() 
 
 
 def get_recip_lat_vecs(lat_vecs):
