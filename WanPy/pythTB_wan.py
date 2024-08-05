@@ -12,13 +12,14 @@ if TYPE_CHECKING:
 
 
 class Lattice():
-    def __init__(self, model):
+    def __init__(self, model: tb_model):
         self._orbs = model.get_orb()
         self._n_orb = model.get_num_orbitals()
         self._lat_vecs = model.get_lat() # lattice vectors
         self._recip_lat_vecs = self.get_recip_lat_vecs()
 
     def report(self):
+        """Prints information about the lattice attributes."""
         print("Lattice vectors (Cartesian coordinates)")
         for idx, lat_vec in enumerate(self._lat_vecs):
             print(f"a_{idx} ===> {lat_vec}")
@@ -34,10 +35,12 @@ class Lattice():
             print(f"{idx} ===> {pos}")
 
     def get_recip_lat_vecs(self):
+        """Returns reciprocal lattice vectors."""
         b = 2 * np.pi * np.linalg.inv(self._lat_vecs).T
         return b
     
     def get_orb(self, Cartesian: bool = False):
+        """Returns orbtial vectors."""
         if Cartesian:
             return self._orbs @ self._lat_vecs
         else:
@@ -45,46 +48,71 @@ class Lattice():
 
 
 class K_mesh():
-    def __init__(self, model, *nks):
+    def __init__(self, model: tb_model, *nks):
         self.Lattice = Lattice(model)
-        self._nks = nks
-        self._idx_arr = list(product(*[range(nk) for nk in nks]))  # list of all k_indices
-        self._full_mesh = self.gen_k_mesh(self, flat=False, endpoint=False)
-        self._flat_mesh = self.gen_k_mesh(self, flat=True, endpoint=False)
+        self.nks = nks
+        self.idx_arr = list(product(*[range(nk) for nk in nks]))  # list of all k_indices
+        self.full_mesh = self.gen_k_mesh(flat=False, endpoint=False)
+        self.flat_mesh = self.gen_k_mesh(flat=True, endpoint=False)
 
-    def gen_k_mesh(self, centered=False, flat=True, endpoint=False):
+    def gen_k_mesh(
+            self, 
+            centered: bool = False, 
+            flat: bool = True, 
+            endpoint: bool = False
+            ) -> np.ndarray:
         """Generate k-mesh in reduced coordinates
 
         Args:
-            nks (tuple(int)): tuple of number of k-points along each reciprocal lattice basis vector
-            centered (bool, optional): Whether Gamma is at origin or ceneter of mesh. Defaults to False.
-            flat (bool, optional):
-            If True returns rank 1 matrix of k-points,
-            If False returns rank 2 matrix of k-points. Defaults to True.
-            endpoint (bool, optional): If True includes both borders of BZ. Defaults to False.
+            centered: 
+                If True, mesh is defined from [-0.5, 0.5] along each direction. 
+                Defaults to False.
+            flat:
+                If True, returns flattened array of k-points. If False, returns
+                reshaped array with axes along each k-space dimension. Defaults to True.
+            endpoint: 
+                If True, includes 1 in the mesh. Defaults to False.
 
         Returns:
-            k-mesh (np.array): list of k-mesh coordinates
+            k-mesh: 
+                Array of k-mesh coordinates.
         """
         end_pts = [-0.5, 0.5] if centered else [0, 1]
+        # end_pts = [0, 1]
 
-        k_vals = [np.linspace(end_pts[0], end_pts[1], nk, endpoint=endpoint) for nk in self._nks]
+        k_vals = [np.linspace(end_pts[0], end_pts[1], nk, endpoint=endpoint) for nk in self.nks]
         mesh = np.array(list(product(*k_vals)))
 
-        return mesh if flat else mesh.reshape(*[nk for nk in self._nks], len(self._nks))
+        return mesh if flat else mesh.reshape(*[nk for nk in self.nks], len(self.nks))
     
-    def get_k_shell(self, N_sh, tol_dp=8, report=False):
-        dk = np.array([self.Lattice._recip_lat_vecs[i] / nk for i, nk in enumerate(self._nks)])
+    def get_k_shell(
+            self, 
+            N_sh: int, 
+            report: bool = False
+            ):
+        """Generates shells of k-points around Gamma.
+
+        Returns array of vectors connecting the origin to nearest neighboring k-points 
+        in a given mesh, along with vectors of reduced coordinates. 
+
+        Args:
+            N_sh: 
+                Number of nearest neighbor shells.
+            report:
+                If True, prints 
+        
+        """
+        dk = np.array([self.Lattice._recip_lat_vecs[i] / nk for i, nk in enumerate(self.nks)])
 
         # vectors of integers multiplying dk
-        nnbr_idx = list(product(list(range(-N_sh, N_sh + 1)), repeat=len(self._nks)))
+        nnbr_idx = list(product(list(range(-N_sh, N_sh + 1)), repeat=len(self.nks)))
         nnbr_idx.remove((0, 0))
         nnbr_idx = np.array(nnbr_idx)
 
         # vectors connecting k-points near Gamma point
         b_vecs = np.array([nnbr_idx[i] @ dk for i in range(nnbr_idx.shape[0])])
         dists = np.array([np.vdot(b_vecs[i], b_vecs[i]) for i in range(b_vecs.shape[0])])
-        dists = dists.round(tol_dp)
+        dists = dists.round(10)
 
         # sorting by distance
         sorted_idxs = np.argsort(dists)
@@ -118,7 +146,7 @@ class K_mesh():
     
     def get_weights(self, N_sh=1, report=False):
         k_shell, idx_shell = self.get_k_shell(N_sh=N_sh, report=report)
-        dim_k = len(self._nks)
+        dim_k = len(self.nks)
         Cart_idx = list(comb(range(dim_k), 2))
         n_comb = len(Cart_idx)
 
@@ -142,33 +170,37 @@ class K_mesh():
 
 
 class Bloch():
-    def __init__(self, model, *nks):
-        self._model = model
-        self._nks = nks
+    def __init__(self, model: tb_model, *nks):
+        self.model = model
         self.Lattice = Lattice(model)
         self.K_mesh = K_mesh(model, *nks)
+        self.set_Bloch_ham()
 
 
     def solve_model(self):
-        u_wfs = wf_array(self._model, [*self.K_mesh._nks])
-        for k_idx in self.K_mesh._idx_arr:
-            u_wfs.solve_on_one_point(self.K_mesh._full_mesh[k_idx], [*k_idx])
+        """
+        Solves for the Bloch eigenstates on the system defined by the model over a semi-full 
+        k-mesh, e.g. in 3D reduced coordinates {k = [kx, ky, kz] | k_i in [0, 1)}.
+        """
+        u_wfs = wf_array(self.model, [*self.K_mesh.nks])
+        for k_idx in self.K_mesh.idx_arr:
+            u_wfs.solve_on_one_point(self.K_mesh.full_mesh[k_idx], [*k_idx])
         u_wfs = np.array(u_wfs._wfs, dtype=complex)
         self.set_wfs(u_wfs)
 
-
-    def set_wfs(self, wfs, cell_periodic=True):
-        if cell_periodic:
-            self._u_wfs = wfs
-            self._psi_wfs = self.get_bloch_wfs(wfs)
-        else:
-            self._psi_wfs = wfs
-            self._u_wfs = self.get_bloch_wfs(wfs, inverse=True)
-
-        self._n_states = self._u_wfs.shape[-2]
-        self._M = self.k_overlap_mat()
+    def get_states(self):
+        """Returns dictionary containing Bloch and cell-periodic eigenstates."""
+        assert hasattr(self, "_psi_wfs"), "Need to call `solve_model` or `set_wfs` to initialize Bloch states"
+        return {"Bloch": self._psi_wfs, "Cell periodic": self._u_wfs}
     
-
+    def get_Bloch_Ham(self):
+        return self.H_k
+    
+    def get_overlap_mat(self):
+        """Returns overlap matrix."""
+        assert hasattr(self, "_M"), "Need to call `solve_model` or `set_wfs` to initialize overlap matrix"
+        return self._M
+    
     def get_orb_phases(self, inverse=False):
         """
         Introduces e^i{k.tau} factors
@@ -182,65 +214,118 @@ class Bloch():
         orb_phases (np.array): array of phases at each k value
         """
         lam = -1 if inverse else 1  # overall minus if getting cell periodic from Bloch
-        per_dir = list(range(self.K_mesh._flat_mesh.shape[-1]))  # list of periodic dimensions
+        per_dir = list(range(self.K_mesh.flat_mesh.shape[-1]))  # list of periodic dimensions
         # slice second dimension to only keep only periodic dimensions in orb
         per_orb = self.Lattice._orbs[:, per_dir]
 
         # compute a list of phase factors [k_val, orbital]
-        wf_phases = np.exp(lam * 1j * 2 * np.pi * per_orb @ self.K_mesh._flat_mesh.T, dtype=complex).T
+        wf_phases = np.exp(lam * 1j * 2 * np.pi * per_orb @ self.K_mesh.flat_mesh.T, dtype=complex).T
         return wf_phases  # 1D numpy array of dimension norb
     
+    
+    def set_Bloch_ham(self):
+        H_k = np.zeros((*self.K_mesh.nks, self.Lattice._n_orb, self.Lattice._n_orb), dtype=complex)
 
-    def get_bloch_wfs(self, u_wfs, inverse=False):
+        for k_idx in self.K_mesh.idx_arr:
+            k_pt = self.K_mesh.full_mesh[k_idx]
+            H_k[k_idx] = self.model._gen_ham(k_pt)
+
+        self.H_k = H_k
+
+
+    def set_wfs(self, wfs, cell_periodic=True):
         """
-        Change the cell periodic wfs to Bloch wfs
+        Sets the Bloch and cell-periodic eigenstates as class attributes.
 
         Args:
-        orbs (np.array): Orbital positions
-        wfs (pythtb.wf_array): cell periodic wfs [k, nband, norb]
-        k_mesh (np.array): k-mesh on which u_wfs is defined
-
-        Returns:
-        wfs_psi: np.array
-            wfs with orbitals multiplied by proper phase factor
+            wfs (np.ndarray): 
+                Bloch (or cell-periodic) eigenstates defined on a k-mesh corresponding
+                to nks passed during class instantiation. The mesh is assumed to exlude the
+                endpoints, e.g. in reduced coordinates {k = [kx, ky, kz] | k_i in [0, 1)}. 
 
         """
-        phases = self.get_orb_phases(inverse=inverse).reshape(*self.K_mesh._nks, self.Lattice._n_orb)
+        if cell_periodic:
+            self._u_wfs = wfs
+            self._psi_wfs = self.apply_phase(wfs)
+        else:
+            self._psi_wfs = wfs
+            self._u_wfs = self.apply_phase(wfs, inverse=True)
+
+        self._n_states = self._u_wfs.shape[-2]
+        self._M = self.k_overlap_mat()
+    
+
+    def apply_phase(self, wfs, inverse=False):
+        """
+        Change between cell periodic and Bloch wfs by multiplying exp(\pm i k . r)
+
+        Args:
+        wfs (pythtb.wf_array): Bloch or cell periodic wfs [k, nband, norb]
+
+        Returns:
+        wfsxphase (np.ndarray): 
+            wfs with orbitals multiplied by phase factor
+
+        """
+        phases = self.get_orb_phases(inverse=inverse).reshape(*self.K_mesh.nks, self.Lattice._n_orb)
         # Broadcasting the phases to match dimensions
-        psi_wfs = u_wfs * phases[..., np.newaxis, :] 
-        return psi_wfs
+        wfsxphase = wfs * phases[..., np.newaxis, :] 
+        return wfsxphase
     
     def get_pbc_phase(orbs, G):
         """
-        Get phase factors for cell periodic pbc across BZ boundary
+        Get phase factors to multiply the cell periodic states in the first BZ
+        related by the pbc u_{n, k+G} = u_{n, k} exp(-i G . r)
 
         Args:
-            orbs (np.array): reduced coordinates of orbital positions
-            G (list): reciprocal lattice vector in reduced coordinates
+            orbs (np.ndarray): 
+                reduced coordinates of orbital positions
+            G (list): 
+                reciprocal lattice vector in reduced coordinates connecting the 
+                cell periodic states in different BZs
 
         Returns:
-            phase: phase factor to be multiplied to last cell periodic eigenstates
-            in k-mesh
+            phase (np.ndarray): 
+                phase factor to be multiplied to the cell periodic eigenstates
+                in first BZ
         """
         phase = np.array(np.exp(-1j * 2 * np.pi * orbs @ np.array(G).T), dtype=complex).T
         return phase
 
     def get_boundary_phase(self, idx_shell):
+        """
+        Get phase factors to multiply the cell periodic states in the first BZ
+        related by the pbc u_{n, k+G} = u_{n, k} exp(-i G . r)
+
+        Args:
+            idx_shell (np.ndarray): 
+                array of index vectors that connect nearrest neighbor k-points in
+                the k-mesh array. The vector is to be added to the k_mesh index such 
+                that k_mesh[i + idx_shell[j]] will take you to the nearest neighbor 
+                in the k_mesh.
+
+        Returns:
+            bc_phase (np.ndarray): 
+                The shape is [...k(s), shell_idx] where shell_idx is an integer
+                corresponding to a particular idx_vec where the convention is to go  
+                counter-clockwise (e.g. square lattice 0 --> [1, 0], 1 --> [0, 1] etc.)
+
+        """
         k_idx_arr = list(
-            product(*[range(nk) for nk in self.K_mesh._nks])
+            product(*[range(nk) for nk in self.K_mesh.nks])
         )  # all pairwise combinations of k_indices
 
-        bc_phase = np.ones((*self.K_mesh._nks, idx_shell[0].shape[0], self.Lattice._orbs.shape[0]), dtype=complex)
+        bc_phase = np.ones((*self.K_mesh.nks, idx_shell[0].shape[0], self.Lattice._orbs.shape[0]), dtype=complex)
 
         for k_idx in k_idx_arr:
             for shell_idx, idx_vec in enumerate(idx_shell[0]):  # nearest neighbors
                 k_nbr_idx = np.array(k_idx) + idx_vec
                 # apply pbc to index
-                mod_idx = np.mod(k_nbr_idx, self.K_mesh._nks)
+                mod_idx = np.mod(k_nbr_idx, self.K_mesh.nks)
                 diff = k_nbr_idx - mod_idx
-                G = np.divide(np.array(diff), np.array(self.K_mesh._nks))
+                G = np.divide(np.array(diff), np.array(self.K_mesh.nks))
                 # if the translated k-index contains the -1st or last_idx+1 then we crossed the BZ boundary
-                cross_bndry = np.any((k_nbr_idx == -1) | np.logical_or.reduce([k_nbr_idx == nk for nk in self.K_mesh._nks]))
+                cross_bndry = np.any((k_nbr_idx == -1) | np.logical_or.reduce([k_nbr_idx == nk for nk in self.K_mesh.nks]))
                 if cross_bndry:
                     bc_phase[k_idx][shell_idx]= np.exp(-1j * 2 * np.pi * self.Lattice._orbs @ G.T).T
 
@@ -248,27 +333,25 @@ class Bloch():
     
     def k_overlap_mat(self):
         """
-        Compute the overlap matrix of Bloch eigenstates. Assumes that the last u_wf
+        Compute the overlap matrix of the cell periodic eigenstates. Assumes that the last u_wf
         along each periodic direction corresponds to the next to last k-point in the
         mesh (excludes endpoints). This way, the periodic boundary conditions are handled
         internally.
 
-        Args:
-            u_wfs (np.array | wf_array): The cell periodic Bloch wavefunctions
-            orbs (np.array): The orbitals positions
         Returns:
             M (np.array): overlap matrix
         """
 
         # Assumes only one shell for now
-        _, idx_shell = self.K_mesh.get_k_shell(N_sh=1, tol_dp=8, report=False)
+        _, idx_shell = self.K_mesh.get_k_shell(N_sh=1, report=False)
         bc_phase = self.get_boundary_phase(idx_shell)
 
-        # assumes that there is no last element in the k mesh, so we need to introduce phases
         M = np.zeros(
-            (*self.K_mesh._nks, len(idx_shell[0]), self._n_states, self._n_states), dtype=complex
+            (*self.K_mesh.nks, len(idx_shell[0]), self._n_states, self._n_states), dtype=complex
         )  # overlap matrix
+        
         for idx, idx_vec in enumerate(idx_shell[0]):  # nearest neighbors
+            # introduce phases to states when k+b is across the BZ boundary
             states_pbc = np.roll(self._u_wfs, shift=tuple(-idx_vec), axis=(0,1)) * bc_phase[..., idx, np.newaxis,  :]
             M[..., idx, :, :] = np.einsum("...mj, ...nj -> ...mn", self._u_wfs.conj(), states_pbc)
         return M
@@ -288,6 +371,11 @@ class Wannier():
         self.energy_eigstates.solve_model()
         self.tilde_states = Bloch(model, *nks)
 
+    def get_tilde_states(self):
+        return self.tilde_states.get_states()
+    
+    def get_Bloch_Ham(self):
+        return self.tilde_states.get_Bloch_Ham()
 
     def gen_rand_tf_list(self, n_tfs: int):
         def gram_schmidt(vectors):
@@ -360,7 +448,7 @@ class Wannier():
         """
 
         ntfs = tfs.shape[0]
-        A = np.zeros((*self.K_mesh._nks, len(state_idx), ntfs), dtype=complex)
+        A = np.zeros((*self.K_mesh.nks, len(state_idx), ntfs), dtype=complex)
         for n in state_idx:
             for j in range(ntfs):
                 A[..., n, j] = psi_wfs.conj()[..., n, :] @ tfs[j, :]
@@ -382,7 +470,7 @@ class Wannier():
         # swap only last two indices in transpose (ignore k indices)
         # slice psi_wf to keep only occupied bands
         psi_tilde = (V @ Wh).transpose(
-            *([i for i in range(len(self.K_mesh._nks))] + [len(self.K_mesh._nks) + 1, len(self.K_mesh._nks)])
+            *([i for i in range(len(self.K_mesh.nks))] + [len(self.K_mesh.nks) + 1, len(self.K_mesh.nks)])
         ) @ psi_wfs[..., state_idx, :]  # [*nk_i, nband, norb]
 
         return psi_tilde
@@ -626,8 +714,10 @@ class Wannier():
 
             if omega_I_new > omega_I_prev:
                 print("Warning: Omega_I is increasing.")
-
-            if abs(omega_I_prev - omega_I_new) <= tol:
+            
+            if abs(omega_I_prev - omega_I_new) * (iter_num - i) <= tol:
+                # assuming the change in omega_i monatonically decreases, omega_i will not change
+                # more than tolerance with remaining steps
                 print("Omega_I has converged within tolerance. Breaking loop")
                 return states_min
 
@@ -650,7 +740,7 @@ class Wannier():
         return expM
     
     
-    def find_min_unitary(self, eps=1 / 160, iter_num=10, verbose=False, tol=1e-10):
+    def find_min_unitary(self, eps=1 / 160, iter_num=10, verbose=False, tol=1e-3, grad_min=1e-3):
         """
         Finds the unitary that minimizing the gauge dependent part of the spread. 
 
@@ -682,6 +772,7 @@ class Wannier():
         M = np.copy(M)  # new overlap matrix
 
         # initializing
+        omega_tilde_prev = self._get_Omega_til(M, w_b, k_shell)
         grad_mag_prev = 0
         eta = 1
         for i in range(iter_num):
@@ -703,21 +794,26 @@ class Wannier():
                                     )
 
             grad_mag = np.linalg.norm(np.sum(G, axis=(0,1)))
+            omega_tilde_new = self._get_Omega_til(M, w_b, k_shell)
 
-            if abs(grad_mag) <= tol:
+            if abs(grad_mag) <= grad_min and abs(omega_tilde_prev - omega_tilde_new) * (iter_num - i) <= tol:
                 print("Omega_tilde minimization has converged within tolerance. Breaking the loop")
+                print(
+                f"{i} Omega_til = {omega_tilde_new.real}, Grad mag: {grad_mag}"
+                )
                 u_max_loc = np.einsum('...ji, ...jm -> ...im', U, u_wfs)
                 return u_max_loc, U
+            
             if grad_mag_prev < grad_mag and i!=0:
                 print("Warning: Gradient increasing.")
-            if abs(grad_mag_prev - grad_mag) <= tol:
-                print("Warning: Found local minima.")
+
             if verbose:
-                omega_tilde = self._get_Omega_til(M, w_b, k_shell)
                 print(
-                    f"{i} Omega_til = {omega_tilde.real}, Grad mag: {grad_mag}"
+                    f"{i} Omega_til = {omega_tilde_new.real}, Grad mag: {grad_mag}"
                 )
             grad_mag_prev = grad_mag
+            omega_tilde_prev = omega_tilde_new
+
 
         u_max_loc = np.einsum('...ji, ...jm -> ...im', U, u_wfs)
         return u_max_loc, U
@@ -728,7 +824,9 @@ class Wannier():
         iter_num_omega_i=1000,
         iter_num_omega_til=1000,
         eps=1e-3,
-        tol=1e-10,
+        tol_omega_i=1e-5,
+        tol_omega_til=1e-10,
+        grad_min=1e-3,
         alpha=1,
         verbose=False,
         save=False, save_name=''
@@ -755,7 +853,7 @@ class Wannier():
             outer_states,
             self.tilde_states._u_wfs,
             iter_num=iter_num_omega_i,
-            verbose=verbose, alpha=alpha, tol=tol
+            verbose=verbose, alpha=alpha, tol=tol_omega_i
         )
         self.tilde_states.set_wfs(util_min_Wan)
 
@@ -766,7 +864,8 @@ class Wannier():
         self.tilde_states.set_wfs(psi_til_til_min, cell_periodic=False)
 
         # Finding optimal gauge
-        u_max_loc, _ = self.find_min_unitary(eps=eps, iter_num=iter_num_omega_til, verbose=verbose, tol=tol)
+        u_max_loc, _ = self.find_min_unitary(
+            eps=eps, iter_num=iter_num_omega_til, verbose=verbose, tol=tol_omega_til, grad_min=grad_min)
         self.tilde_states.set_wfs(u_max_loc)
 
         # Fourier transform Bloch-like states
