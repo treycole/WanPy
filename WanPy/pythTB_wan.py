@@ -49,11 +49,27 @@ class Lattice():
 
 class K_mesh():
     def __init__(self, model: tb_model, *nks):
-        self.Lattice = Lattice(model)
+        """Class for storing and manipulating a regular mesh of k-points. 
+
+        Attributes:
+            Lattice: 
+                Encodes the geometry of the underlying lattice for making nearest neighbor shells
+                and generating finite difference weights.
+            nks (tuple):
+                A tuple with each element being the number of k-points along the reciprocal lattice
+                vector in the order that they are encoded in Lattice.
+            dim (int):
+                The spatial dimension of the reciprocal space mesh.
+            idx_arr (list[list[int]]):
+                A list of containing all possible indices for the k-mesh. This is primarily for computational
+                effeciency by avoiding a variable number of nested loops (since the dimension of the mesh varies).  
+        """
+        self.Lattice: Lattice = Lattice(model)
         self.nks = nks
-        self.idx_arr = list(product(*[range(nk) for nk in nks]))  # list of all k_indices
-        self.full_mesh = self.gen_k_mesh(flat=False, endpoint=False)
-        self.flat_mesh = self.gen_k_mesh(flat=True, endpoint=False)
+        self.dim: int = len(nks)
+        self.idx_arr: list = list(product(*[range(nk) for nk in nks]))  # list of all k_indices
+        self.full_mesh: np.ndarray = self.gen_k_mesh(flat=False, endpoint=False)
+        self.flat_mesh: np.ndarray = self.gen_k_mesh(flat=True, endpoint=False)
 
     def gen_k_mesh(
             self, 
@@ -61,24 +77,24 @@ class K_mesh():
             flat: bool = True, 
             endpoint: bool = False
             ) -> np.ndarray:
-        """Generate k-mesh in reduced coordinates
+        """Generate a regular k-mesh in reduced coordinates. 
 
         Args:
-            centered: 
+            centered (bool): 
                 If True, mesh is defined from [-0.5, 0.5] along each direction. 
                 Defaults to False.
-            flat:
-                If True, returns flattened array of k-points. If False, returns
-                reshaped array with axes along each k-space dimension. Defaults to True.
-            endpoint: 
-                If True, includes 1 in the mesh. Defaults to False.
+            flat (bool):
+                If True, returns flattened array of k-points (e.g. of dimension nkx*nky*nkz x 3). 
+                If False, returns reshaped array with axes along each k-space dimension 
+                (e.g. of dimension nkx x nky x nkz x 3). Defaults to True.
+            endpoint (bool): 
+                If True, includes 1 (edge of BZ in reduced coordinates) in the mesh. Defaults to False. When Wannierizing shoule 
 
         Returns:
-            k-mesh: 
+            k-mesh (np.ndarray): 
                 Array of k-mesh coordinates.
         """
         end_pts = [-0.5, 0.5] if centered else [0, 1]
-        # end_pts = [0, 1]
 
         k_vals = [np.linspace(end_pts[0], end_pts[1], nk, endpoint=endpoint) for nk in self.nks]
         mesh = np.array(list(product(*k_vals)))
@@ -90,28 +106,35 @@ class K_mesh():
             N_sh: int, 
             report: bool = False
             ):
-        """Generates shells of k-points around Gamma.
+        """Generates shells of k-points around the Gamma point.
 
         Returns array of vectors connecting the origin to nearest neighboring k-points 
-        in a given mesh, along with vectors of reduced coordinates. 
+        in the mesh, along with vectors of reduced coordinates. 
 
         Args:
-            N_sh: 
+            N_sh (int): 
                 Number of nearest neighbor shells.
-            report:
-                If True, prints 
-        
-        """
-        dk = np.array([self.Lattice._recip_lat_vecs[i] / nk for i, nk in enumerate(self.nks)])
+            report (bool):
+                If True, prints a summary of the k-shell.
 
-        # vectors of integers multiplying dk
+        Returns:
+            k_shell (np.ndarray[float]):
+                Array of vectors in inverse units of lattice vectorsconnecting nearest neighbor k-mesh points.
+            idx_shell (np.ndarray[int]):
+                Array of vectors of integers used for indexing the nearest neighboring k-mesh points
+                to a given k-mesh point.
+        """
+        # basis vectors connecting neighboring mesh points (in inverse lattice vector units)
+        dk = np.array([self.Lattice._recip_lat_vecs[i] / nk for i, nk in enumerate(self.nks)])
+        # array of integers e.g. in 2D for N_sh = 1 would be [0,1], [1,0], [0,-1], [-1,0]
         nnbr_idx = list(product(list(range(-N_sh, N_sh + 1)), repeat=len(self.nks)))
         nnbr_idx.remove((0, 0))
         nnbr_idx = np.array(nnbr_idx)
-
-        # vectors connecting k-points near Gamma point
+        # vectors connecting k-points near Gamma point (in inverse lattice vector units)
         b_vecs = np.array([nnbr_idx[i] @ dk for i in range(nnbr_idx.shape[0])])
+        # distances to points around Gamma
         dists = np.array([np.vdot(b_vecs[i], b_vecs[i]) for i in range(b_vecs.shape[0])])
+        # remove numerical noise
         dists = dists.round(10)
 
         # sorting by distance
@@ -120,9 +143,9 @@ class K_mesh():
         b_vecs_sorted = b_vecs[sorted_idxs]
         nnbr_idx_sorted = nnbr_idx[sorted_idxs]
 
+        unique_dists = sorted(list(set(dists))) # removes repeated distances
+        keep_dists = unique_dists[:N_sh] # keep only distances up to N_sh away
         # keep only b_vecs in N_sh shells
-        unique_dists = sorted(list(set(dists)))
-        keep_dists = unique_dists[:N_sh]
         k_shell = [
             b_vecs_sorted[np.isin(dists_sorted, keep_dists[i])]
             for i in range(len(keep_dists))
@@ -145,6 +168,8 @@ class K_mesh():
     
     
     def get_weights(self, N_sh=1, report=False):
+        """Generates the finite difference weights on a k-shell.
+        """
         k_shell, idx_shell = self.get_k_shell(N_sh=N_sh, report=report)
         dim_k = len(self.nks)
         Cart_idx = list(comb(range(dim_k), 2))
@@ -171,15 +196,18 @@ class K_mesh():
 
 class Bloch():
     def __init__(self, model: tb_model, *nks):
-        self.model = model
-        self.Lattice = Lattice(model)
-        self.K_mesh = K_mesh(model, *nks)
+        """Class for storing and manipulating Bloch like wavefunctions.
+        
+        Wavefunctions are defined on a semi-full reciprocal space mesh.
+        """
+        self.model: tb_model = model
+        self.Lattice: Lattice = Lattice(model)
+        self.K_mesh: K_mesh = K_mesh(model, *nks)
         self.set_Bloch_ham()
-
 
     def solve_model(self):
         """
-        Solves for the Bloch eigenstates on the system defined by the model over a semi-full 
+        Solves for the eigenstates of the Bloch Hamiltonian defined by the model over a semi-full 
         k-mesh, e.g. in 3D reduced coordinates {k = [kx, ky, kz] | k_i in [0, 1)}.
         """
         u_wfs = wf_array(self.model, [*self.K_mesh.nks])
@@ -194,24 +222,23 @@ class Bloch():
         return {"Bloch": self._psi_wfs, "Cell periodic": self._u_wfs}
     
     def get_Bloch_Ham(self):
+        """Returns the Bloch Hamiltonian of the model defined over the semi-full k-mesh."""
         return self.H_k
     
     def get_overlap_mat(self):
-        """Returns overlap matrix."""
+        """Returns overlap matrix.
+        
+        Overlap matrix defined as M_{n,m,k,b} = <u_{n, k} | u_{m, k+b}>
+        """
         assert hasattr(self, "_M"), "Need to call `solve_model` or `set_wfs` to initialize overlap matrix"
         return self._M
     
     def get_orb_phases(self, inverse=False):
-        """
-        Introduces e^i{k.tau} factors
+        """Returns exp(\pm i k.tau) factors
 
         Args:
-            orbs (np.array): Orbital positions
-            k_vec (np.array): k space grid (assumes flattened)
-            inverse (boolean): whether to get cell periodic (True) or Bloch (False) wfs
-
-        Returns:
-        orb_phases (np.array): array of phases at each k value
+            Inverse (bool):
+                If True, multiplies factor of -1 for mutiplying Bloch states to get cell-periodic states. 
         """
         lam = -1 if inverse else 1  # overall minus if getting cell periodic from Bloch
         per_dir = list(range(self.K_mesh.flat_mesh.shape[-1]))  # list of periodic dimensions
@@ -233,7 +260,7 @@ class Bloch():
         self.H_k = H_k
 
 
-    def set_wfs(self, wfs, cell_periodic=True):
+    def set_wfs(self, wfs: np.ndarray, cell_periodic: bool=True):
         """
         Sets the Bloch and cell-periodic eigenstates as class attributes.
 
@@ -257,7 +284,7 @@ class Bloch():
 
     def apply_phase(self, wfs, inverse=False):
         """
-        Change between cell periodic and Bloch wfs by multiplying exp(\pm i k . r)
+        Change between cell periodic and Bloch wfs by multiplying exp(\pm i k . tau)
 
         Args:
         wfs (pythtb.wf_array): Bloch or cell periodic wfs [k, nband, norb]
@@ -324,7 +351,7 @@ class Bloch():
                 mod_idx = np.mod(k_nbr_idx, self.K_mesh.nks)
                 diff = k_nbr_idx - mod_idx
                 G = np.divide(np.array(diff), np.array(self.K_mesh.nks))
-                # if the translated k-index contains the -1st or last_idx+1 then we crossed the BZ boundary
+                # if the translated k-index contains -1 or nk_i+1 then we crossed the BZ boundary
                 cross_bndry = np.any((k_nbr_idx == -1) | np.logical_or.reduce([k_nbr_idx == nk for nk in self.K_mesh.nks]))
                 if cross_bndry:
                     bc_phase[k_idx][shell_idx]= np.exp(-1j * 2 * np.pi * self.Lattice._orbs @ G.T).T
@@ -361,57 +388,56 @@ class Wannier():
     def __init__(
             self, model: tb_model, nks: list  
             ):
-        self._model = model
-        self._nks = nks
+        self._model: tb_model = model
+        self._nks: list = nks
 
-        self.Lattice = Lattice(model)
-        self.K_mesh = K_mesh(model, *nks)
+        self.Lattice: Lattice = Lattice(model)
+        self.K_mesh: K_mesh = K_mesh(model, *nks)
 
-        self.energy_eigstates = Bloch(model, *nks)
+        self.energy_eigstates: Bloch = Bloch(model, *nks)
         self.energy_eigstates.solve_model()
-        self.tilde_states = Bloch(model, *nks)
+        self.tilde_states: Bloch = Bloch(model, *nks)
 
     def get_tilde_states(self):
         return self.tilde_states.get_states()
     
     def get_Bloch_Ham(self):
-        return self.tilde_states.get_Bloch_Ham()
-
-    def gen_rand_tf_list(self, n_tfs: int):
-        def gram_schmidt(vectors):
-            orthogonal_vectors = []
-            for v in vectors:
-                for u in orthogonal_vectors:
-                    v -= np.dot(v, u) * u
-                norm = np.linalg.norm(v)
-                if norm > 1e-10:
-                    orthogonal_vectors.append(v / norm)
-            return np.array(orthogonal_vectors)
-
-        # Generate three random 4-dimensional vectors
-        vectors = abs(np.random.randn(n_tfs, self.Lattice._n_orb))
-        # Apply Gram-Schmidt to orthogonalize them
-        orthonorm_vecs = gram_schmidt(vectors)
-
-        tf_list = []
-        for n in range(n_tfs):
-            tf = []
-            for orb in range(self.Lattice._n_orb):
-                tf.append((orb, orthonorm_vecs[n, orb]))
-            tf_list.append(tf)
-        return tf_list
-    
+        return self.tilde_states.get_Bloch_Ham()    
 
     def get_trial_wfs(self, tf_list):
         """
         Args:
-            tf_list: list[int | list[tuple]]
+            tf_list: list[int | list[tuple]] | list["random", int]
                 list of numbers or tuples defining either the integer site
                 of the trial function (delta) or the tuples (site, amplitude)
     
         Returns:
-            tfs (num_tf x norb np.array): 2 dimensional array of trial functions
+            tfs (num_tf x norb np.ndarray): 2 dimensional array of trial functions
         """
+        if tf_list[0] == "random":
+            n_tfs = tf_list[1]
+            def gram_schmidt(vectors):
+                orthogonal_vectors = []
+                for v in vectors:
+                    for u in orthogonal_vectors:
+                        v -= np.dot(v, u) * u
+                    norm = np.linalg.norm(v)
+                    if norm > 1e-10:
+                        orthogonal_vectors.append(v / norm)
+                return np.array(orthogonal_vectors)
+
+            # Generate n_tfs random n_orb-dimensional vectors
+            vectors = abs(np.random.randn(n_tfs, self.Lattice._n_orb))
+            # Apply Gram-Schmidt to orthonormalize them
+            orthonorm_vecs = gram_schmidt(vectors)
+
+            tf_list = []
+            for n in range(n_tfs):
+                tf = []
+                for orb in range(self.Lattice._n_orb):
+                    tf.append((orb, orthonorm_vecs[n, orb]))
+                tf_list.append(tf)
+
         # number of trial functions to define
         num_tf = len(tf_list)
 
@@ -456,21 +482,20 @@ class Wannier():
         return A
     
     
-    def get_psi_tilde(self, psi_wfs, tfs, state_idx=None, compact_SVD=False):
+    def get_psi_tilde(self, psi_wfs, tfs, state_idx, compact_SVD=False):
         A = self.tf_overlap_mat(psi_wfs, tfs, state_idx=state_idx)
+        V, S, Wh = np.linalg.svd(A, full_matrices=False)
+
         # TODO: Test this method
         if compact_SVD: 
-            V, S, Wh = np.linalg.svd(A, full_matrices=True)
             V = V[..., :, :-1]
             S = S[..., :-1]
             Wh = Wh[..., :-1, :]
 
-        V, S, Wh = np.linalg.svd(A, full_matrices=False)
-
         # swap only last two indices in transpose (ignore k indices)
         # slice psi_wf to keep only occupied bands
         psi_tilde = (V @ Wh).transpose(
-            *([i for i in range(len(self.K_mesh.nks))] + [len(self.K_mesh.nks) + 1, len(self.K_mesh.nks)])
+            *([i for i in range(self.K_mesh.dim)] + [self.K_mesh.dim + 1, self.K_mesh.dim])
         ) @ psi_wfs[..., state_idx, :]  # [*nk_i, nband, norb]
 
         return psi_tilde
@@ -489,9 +514,6 @@ class Wannier():
         """
 
         self.tf_list = tf_list
-        if tf_list[0] == "random":
-            n_tfs = tf_list[1]
-            tf_list = self.gen_rand_tf_list(n_tfs)
         self.trial_wfs = self.get_trial_wfs(tf_list)
 
         if band_idxs is None:  # assume we are Wannierizing occupied bands at half-filling
@@ -656,20 +678,35 @@ class Wannier():
      ####### Maximally Localized WF ############
 
     def find_optimal_subspace(
-        self, outer_states, inner_states, iter_num=100, verbose=False, tol=1e-10, alpha=1
+        self, N_wfs=None, inner_window=None, outer_window="occupied", iter_num=100, verbose=False, tol=1e-10, alpha=1
     ):
         nks = self._nks 
         Nk = np.prod(nks)
         n_orb = self.Lattice._n_orb
-        n_states = self.tilde_states._n_states
-        dim_subspace = n_states
+        n_occ = int(n_orb/2)
+        tilde_states = self.tilde_states._u_wfs
+
+        if N_wfs is None:
+            N_wfs = self.tilde_states._n_states
+        if outer_window == "occupied":
+            outer_window = list(range(n_occ))
+        N_outer = len(outer_window)
+        outer_states = self.energy_eigstates._u_wfs.take(outer_window, axis=-2)
+        if inner_window is not None:
+            N_inner = len(inner_window)
+            inner_states = self.energy_eigstates._u_wfs.take(inner_window, axis=-2)
+        else:
+            N_inner = 0
+
+        min_window = list(np.setdiff1d(outer_window, inner_window))
+        min_states = self.energy_eigstates._u_wfs[..., min_window, :]
     
         # Assumes only one shell for now
         w_b, _, idx_shell = self.K_mesh.get_weights(N_sh=1)
         num_nnbrs = len(idx_shell[0])
         bc_phase = self.tilde_states.get_boundary_phase(idx_shell=idx_shell)
 
-        P = np.einsum("...ni, ...nj -> ...ij", inner_states, inner_states.conj())
+        P = np.einsum("...ni, ...nj -> ...ij", tilde_states, tilde_states.conj())
 
         # Projector on initial subspace at each k (for pbc of neighboring spaces)
         P_nbr = np.zeros((*nks, num_nnbrs, n_orb, n_orb), dtype=complex)
@@ -677,7 +714,7 @@ class Wannier():
         T_kb = np.zeros((*nks, num_nnbrs), dtype=complex)
 
         for idx, idx_vec in enumerate(idx_shell[0]):  # nearest neighbors
-            states_pbc = np.roll(inner_states, shift=tuple(-idx_vec), axis=(0,1)) * bc_phase[..., idx, np.newaxis,  :]
+            states_pbc = np.roll(tilde_states, shift=tuple(-idx_vec), axis=(0,1)) * bc_phase[..., idx, np.newaxis,  :]
             P_nbr[..., idx, :, :] = np.einsum(
                     "...ni, ...nj -> ...ij", states_pbc, states_pbc.conj()
                     )
@@ -689,19 +726,17 @@ class Wannier():
         Q_nbr_min = np.copy(Q_nbr)  # start of iteration
 
         # states spanning optimal subspace minimizing gauge invariant spread
-        states_min = np.zeros((*nks, dim_subspace, n_orb), dtype=complex)
+        states_min = np.zeros((*nks, N_wfs-N_inner, n_orb), dtype=complex)
         omega_I_prev = (1 / Nk) * w_b[0] * np.sum(T_kb)
 
         for i in range(iter_num):
             P_avg = np.sum(w_b[0] * P_nbr_min, axis=-3)
-            Z = outer_states[..., :, :].conj() @ P_avg @ np.transpose(outer_states[..., : ,:], axes=(0,1,3,2))
-
-            _, eigvecs = np.linalg.eigh(Z)  # [val, idx]
-            states_min = np.einsum('...ij, ...ik->...jk', eigvecs[..., -dim_subspace:], outer_states)
+            Z = min_states.conj() @ P_avg @ np.transpose(min_states, axes=(0,1,3,2))
+            _, eigvecs = np.linalg.eigh(Z) # [val, idx]
+            states_min = np.einsum('...ij, ...ik->...jk', eigvecs[..., -(N_wfs-N_inner):], min_states)
 
             P_new = np.einsum("...ni,...nj->...ij", states_min, states_min.conj())
             P_min = alpha * P_new + (1 - alpha) * P_min # for next iteration
-            
             for idx, idx_vec in enumerate(idx_shell[0]):  # nearest neighbors
                 states_pbc = np.roll(states_min, shift=tuple(-idx_vec), axis=(0,1)) * bc_phase[..., idx, np.newaxis,  :]
                 P_nbr_min[..., idx, :, :] = np.einsum(
@@ -719,14 +754,22 @@ class Wannier():
                 # assuming the change in omega_i monatonically decreases, omega_i will not change
                 # more than tolerance with remaining steps
                 print("Omega_I has converged within tolerance. Breaking loop")
-                return states_min
+                if inner_window is not None:
+                    return_states = np.concatenate((inner_states, states_min), axis=-2)
+                    return return_states
+                else:
+                    return states_min
 
             if verbose:
                 print(f"{i} Omega_I: {omega_I_new.real}")
 
             omega_I_prev = omega_I_new
 
-        return states_min
+        if inner_window is not None:
+            return_states = np.concatenate((inner_states, states_min), axis=-2)
+            return return_states
+        else:
+            return states_min
 
 
     def mat_exp(self, M):
@@ -740,7 +783,7 @@ class Wannier():
         return expM
     
     
-    def find_min_unitary(self, eps=1 / 160, iter_num=10, verbose=False, tol=1e-3, grad_min=1e-3):
+    def find_min_unitary(self, eps=1e-3, iter_num=100, verbose=False, tol=1e-10, grad_min=1e-3):
         """
         Finds the unitary that minimizing the gauge dependent part of the spread. 
 
@@ -820,7 +863,9 @@ class Wannier():
 
     def max_loc(
         self,
-        outer_state_idxs="occupied",
+        N_wfs=None,
+        outer_window="occupied",
+        inner_window=None,
         iter_num_omega_i=1000,
         iter_num_omega_til=1000,
         eps=1e-3,
@@ -841,32 +886,30 @@ class Wannier():
 
         """
 
-        # slicing the disentanglement manifold
-        if outer_state_idxs == "occupied":
-            n_occ = int(self.energy_eigstates._n_states / 2)  # assuming half filled
-            outer_state_idxs = list(range(n_occ))
-
-        outer_states = self.energy_eigstates._u_wfs[..., outer_state_idxs, :]
-
         # Minimizing Omega_I via disentanglement
         util_min_Wan = self.find_optimal_subspace(
-            outer_states,
-            self.tilde_states._u_wfs,
+            N_wfs=N_wfs,
+            outer_window=outer_window,
+            inner_window=inner_window,
             iter_num=iter_num_omega_i,
             verbose=verbose, alpha=alpha, tol=tol_omega_i
         )
         self.tilde_states.set_wfs(util_min_Wan)
+        print("min omegai", self.tilde_states._u_wfs.shape)
 
         # Second projection
         psi_til_til_min = self.get_psi_tilde(
             self.tilde_states._psi_wfs, self.trial_wfs, state_idx=list(range(self.tilde_states._psi_wfs.shape[2]))
         )
         self.tilde_states.set_wfs(psi_til_til_min, cell_periodic=False)
+        print("2nd proj", self.tilde_states._u_wfs.shape)
 
         # Finding optimal gauge
         u_max_loc, _ = self.find_min_unitary(
             eps=eps, iter_num=iter_num_omega_til, verbose=verbose, tol=tol_omega_til, grad_min=grad_min)
         self.tilde_states.set_wfs(u_max_loc)
+        print("min omegatil", self.tilde_states._u_wfs.shape)
+
 
         # Fourier transform Bloch-like states
         psi_wfs = self.tilde_states._psi_wfs
