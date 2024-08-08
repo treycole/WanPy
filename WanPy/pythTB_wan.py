@@ -678,20 +678,35 @@ class Wannier():
      ####### Maximally Localized WF ############
 
     def find_optimal_subspace(
-        self, outer_states, inner_states, iter_num=100, verbose=False, tol=1e-10, alpha=1
+        self, N_wfs=None, inner_window=None, outer_window="occupied", iter_num=100, verbose=False, tol=1e-10, alpha=1
     ):
         nks = self._nks 
         Nk = np.prod(nks)
         n_orb = self.Lattice._n_orb
-        n_states = self.tilde_states._n_states
-        dim_subspace = n_states
+        n_occ = int(n_orb/2)
+        tilde_states = self.tilde_states._u_wfs
+
+        if N_wfs is None:
+            N_wfs = self.tilde_states._n_states
+        if outer_window == "occupied":
+            outer_window = list(range(n_occ))
+        N_outer = len(outer_window)
+        outer_states = self.energy_eigstates._u_wfs.take(outer_window, axis=-2)
+        if inner_window is not None:
+            N_inner = len(inner_window)
+            inner_states = self.energy_eigstates._u_wfs.take(inner_window, axis=-2)
+        else:
+            N_inner = 0
+
+        min_window = list(np.setdiff1d(outer_window, inner_window))
+        min_states = self.energy_eigstates._u_wfs[..., min_window, :]
     
         # Assumes only one shell for now
         w_b, _, idx_shell = self.K_mesh.get_weights(N_sh=1)
         num_nnbrs = len(idx_shell[0])
         bc_phase = self.tilde_states.get_boundary_phase(idx_shell=idx_shell)
 
-        P = np.einsum("...ni, ...nj -> ...ij", inner_states, inner_states.conj())
+        P = np.einsum("...ni, ...nj -> ...ij", tilde_states, tilde_states.conj())
 
         # Projector on initial subspace at each k (for pbc of neighboring spaces)
         P_nbr = np.zeros((*nks, num_nnbrs, n_orb, n_orb), dtype=complex)
@@ -699,7 +714,7 @@ class Wannier():
         T_kb = np.zeros((*nks, num_nnbrs), dtype=complex)
 
         for idx, idx_vec in enumerate(idx_shell[0]):  # nearest neighbors
-            states_pbc = np.roll(inner_states, shift=tuple(-idx_vec), axis=(0,1)) * bc_phase[..., idx, np.newaxis,  :]
+            states_pbc = np.roll(tilde_states, shift=tuple(-idx_vec), axis=(0,1)) * bc_phase[..., idx, np.newaxis,  :]
             P_nbr[..., idx, :, :] = np.einsum(
                     "...ni, ...nj -> ...ij", states_pbc, states_pbc.conj()
                     )
@@ -711,19 +726,17 @@ class Wannier():
         Q_nbr_min = np.copy(Q_nbr)  # start of iteration
 
         # states spanning optimal subspace minimizing gauge invariant spread
-        states_min = np.zeros((*nks, dim_subspace, n_orb), dtype=complex)
+        states_min = np.zeros((*nks, N_wfs-N_inner, n_orb), dtype=complex)
         omega_I_prev = (1 / Nk) * w_b[0] * np.sum(T_kb)
 
         for i in range(iter_num):
             P_avg = np.sum(w_b[0] * P_nbr_min, axis=-3)
-            Z = outer_states[..., :, :].conj() @ P_avg @ np.transpose(outer_states[..., : ,:], axes=(0,1,3,2))
-
-            _, eigvecs = np.linalg.eigh(Z)  # [val, idx]
-            states_min = np.einsum('...ij, ...ik->...jk', eigvecs[..., -dim_subspace:], outer_states)
+            Z = min_states.conj() @ P_avg @ np.transpose(min_states, axes=(0,1,3,2))
+            _, eigvecs = np.linalg.eigh(Z) # [val, idx]
+            states_min = np.einsum('...ij, ...ik->...jk', eigvecs[..., -(N_wfs-N_inner):], min_states)
 
             P_new = np.einsum("...ni,...nj->...ij", states_min, states_min.conj())
             P_min = alpha * P_new + (1 - alpha) * P_min # for next iteration
-            
             for idx, idx_vec in enumerate(idx_shell[0]):  # nearest neighbors
                 states_pbc = np.roll(states_min, shift=tuple(-idx_vec), axis=(0,1)) * bc_phase[..., idx, np.newaxis,  :]
                 P_nbr_min[..., idx, :, :] = np.einsum(
@@ -741,14 +754,22 @@ class Wannier():
                 # assuming the change in omega_i monatonically decreases, omega_i will not change
                 # more than tolerance with remaining steps
                 print("Omega_I has converged within tolerance. Breaking loop")
-                return states_min
+                if inner_window is not None:
+                    return_states = np.concatenate((inner_states, states_min), axis=-2)
+                    return return_states
+                else:
+                    return states_min
 
             if verbose:
                 print(f"{i} Omega_I: {omega_I_new.real}")
 
             omega_I_prev = omega_I_new
 
-        return states_min
+        if inner_window is not None:
+            return_states = np.concatenate((inner_states, states_min), axis=-2)
+            return return_states
+        else:
+            return states_min
 
 
     def mat_exp(self, M):
@@ -842,7 +863,9 @@ class Wannier():
 
     def max_loc(
         self,
-        outer_state_idxs="occupied",
+        N_wfs=None,
+        outer_window="occupied",
+        inner_window=None,
         iter_num_omega_i=1000,
         iter_num_omega_til=1000,
         eps=1e-3,
@@ -863,32 +886,30 @@ class Wannier():
 
         """
 
-        # slicing the disentanglement manifold
-        if outer_state_idxs == "occupied":
-            n_occ = int(self.energy_eigstates._n_states / 2)  # assuming half filled
-            outer_state_idxs = list(range(n_occ))
-
-        outer_states = self.energy_eigstates._u_wfs[..., outer_state_idxs, :]
-
         # Minimizing Omega_I via disentanglement
         util_min_Wan = self.find_optimal_subspace(
-            outer_states,
-            self.tilde_states._u_wfs,
+            N_wfs=N_wfs,
+            outer_window=outer_window,
+            inner_window=inner_window,
             iter_num=iter_num_omega_i,
             verbose=verbose, alpha=alpha, tol=tol_omega_i
         )
         self.tilde_states.set_wfs(util_min_Wan)
+        print("min omegai", self.tilde_states._u_wfs.shape)
 
         # Second projection
         psi_til_til_min = self.get_psi_tilde(
             self.tilde_states._psi_wfs, self.trial_wfs, state_idx=list(range(self.tilde_states._psi_wfs.shape[2]))
         )
         self.tilde_states.set_wfs(psi_til_til_min, cell_periodic=False)
+        print("2nd proj", self.tilde_states._u_wfs.shape)
 
         # Finding optimal gauge
         u_max_loc, _ = self.find_min_unitary(
             eps=eps, iter_num=iter_num_omega_til, verbose=verbose, tol=tol_omega_til, grad_min=grad_min)
         self.tilde_states.set_wfs(u_max_loc)
+        print("min omegatil", self.tilde_states._u_wfs.shape)
+
 
         # Fourier transform Bloch-like states
         psi_wfs = self.tilde_states._psi_wfs
