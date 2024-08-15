@@ -211,15 +211,22 @@ class Bloch():
         k-mesh, e.g. in 3D reduced coordinates {k = [kx, ky, kz] | k_i in [0, 1)}.
         """
         u_wfs = wf_array(self.model, [*self.K_mesh.nks])
+        energies = np.empty([*self.K_mesh.nks, self.Lattice._n_orb])
         for k_idx in self.K_mesh.idx_arr:
+            energies[k_idx] = self.model.solve_one(self.K_mesh.full_mesh[k_idx], eig_vectors=False)
             u_wfs.solve_on_one_point(self.K_mesh.full_mesh[k_idx], [*k_idx])
         u_wfs = np.array(u_wfs._wfs, dtype=complex)
         self.set_wfs(u_wfs)
+        self.energies = energies
 
     def get_states(self):
         """Returns dictionary containing Bloch and cell-periodic eigenstates."""
         assert hasattr(self, "_psi_wfs"), "Need to call `solve_model` or `set_wfs` to initialize Bloch states"
         return {"Bloch": self._psi_wfs, "Cell periodic": self._u_wfs}
+    
+    def get_energies(self):
+        assert hasattr(self, "energies"), "Need to call `solve_model` to initialize energies"
+        return self.energies
     
     def get_Bloch_Ham(self):
         """Returns the Bloch Hamiltonian of the model defined over the semi-full k-mesh."""
@@ -260,7 +267,7 @@ class Bloch():
         self.H_k = H_k
 
 
-    def set_wfs(self, wfs: np.ndarray, cell_periodic: bool=True):
+    def set_wfs(self, wfs, cell_periodic: bool=True):
         """
         Sets the Bloch and cell-periodic eigenstates as class attributes.
 
@@ -678,52 +685,112 @@ class Wannier():
      ####### Maximally Localized WF ############
 
     def find_optimal_subspace(
-        self, N_wfs=None, inner_window=None, outer_window="occupied", iter_num=100, verbose=False, tol=1e-10, alpha=1
+        self, N_wfs=None, inner_window=None, outer_window="occupied", 
+        iter_num=100, verbose=False, tol=1e-10, alpha=1
     ):
+        # useful constants
         nks = self._nks 
         Nk = np.prod(nks)
         n_orb = self.Lattice._n_orb
         n_occ = int(n_orb/2)
-        tilde_states = self.tilde_states._u_wfs
 
-        if N_wfs is None:
-            N_wfs = self.tilde_states._n_states
-        if outer_window == "occupied":
-            outer_window = list(range(n_occ))
-        N_outer = len(outer_window)
-        outer_states = self.energy_eigstates._u_wfs.take(outer_window, axis=-2)
-        if inner_window is not None:
-            N_inner = len(inner_window)
-            inner_states = self.energy_eigstates._u_wfs.take(inner_window, axis=-2)
-        else:
-            N_inner = 0
+        # eigenenergies and eigenstates for inner/outer window
+        energies = self.energy_eigstates.get_energies()
+        unk_states = self.energy_eigstates.get_states()["Cell periodic"]
+        # Bloch-like states that form initial subspace
+        tilde_states = self.tilde_states.get_states()["Cell periodic"]
 
-        min_window = list(np.setdiff1d(outer_window, inner_window))
-        min_states = self.energy_eigstates._u_wfs[..., min_window, :]
-    
         # Assumes only one shell for now
         w_b, _, idx_shell = self.K_mesh.get_weights(N_sh=1)
         num_nnbrs = len(idx_shell[0])
         bc_phase = self.tilde_states.get_boundary_phase(idx_shell=idx_shell)
 
+        # Projector of initial tilde subspace at each k-point
         P = np.einsum("...ni, ...nj -> ...ij", tilde_states, tilde_states.conj())
-
-        # Projector on initial subspace at each k (for pbc of neighboring spaces)
+        # Projectors of initial tilde subspace at points neighboring each k-point
         P_nbr = np.zeros((*nks, num_nnbrs, n_orb, n_orb), dtype=complex)
         Q_nbr = np.zeros((*nks, num_nnbrs, n_orb, n_orb), dtype=complex)
         T_kb = np.zeros((*nks, num_nnbrs), dtype=complex)
-
         for idx, idx_vec in enumerate(idx_shell[0]):  # nearest neighbors
+            # accounting for phase across the BZ boundary
             states_pbc = np.roll(tilde_states, shift=tuple(-idx_vec), axis=(0,1)) * bc_phase[..., idx, np.newaxis,  :]
             P_nbr[..., idx, :, :] = np.einsum(
                     "...ni, ...nj -> ...ij", states_pbc, states_pbc.conj()
                     )
             Q_nbr[..., idx, :, :] = np.eye(n_orb) - P_nbr[..., idx, :, :]
             T_kb[..., idx] = np.trace(P[..., :, :] @ Q_nbr[..., idx, :, :], axis1=-1, axis2=-2)
+        P_min = np.copy(P)  # for start of iteration
+        P_nbr_min = np.copy(P_nbr)  # for start of iteration
+        Q_nbr_min = np.copy(Q_nbr)  # for start of iteration
 
-        P_min = np.copy(P)  # start of iteration
-        P_nbr_min = np.copy(P_nbr)  # start of iteration
-        Q_nbr_min = np.copy(Q_nbr)  # start of iteration
+        #### Setting inner/outer energy windows ####
+
+        # number of states in target manifold 
+        if N_wfs is None:
+            N_wfs = self.tilde_states._n_states
+
+        # outer window
+        if outer_window == "occupied":
+            outer_window_type = "bands"
+            outer_band_idxs = list(range(n_occ))
+            outer_band_energies = energies[..., :n_occ]
+            outer_window = [np.argmin(outer_band_energies), np.argmax(outer_band_energies)]
+            outer_states = unk_states.take(list(range(n_occ)), axis=-2)
+        elif list(outer_window.keys())[0].lower() == 'bands':
+            outer_window_type = "bands"
+            outer_band_idxs = list(outer_window.values())[0]
+            outer_band_energies = energies[..., outer_band_idxs]
+            outer_window = [np.argmin(outer_band_energies), np.argmax(outer_band_energies)]
+            outer_states = unk_states.take(outer_band_idxs, axis=-2)
+            N_outer = len(outer_band_idxs)
+        elif list(outer_window.keys())[0].lower() == 'energy':
+            outer_window_type = "energy"
+            outer_window = np.sort(list(outer_window.values())[0])
+            nan = np.empty(unk_states.shape)
+            nan.fill(np.NaN)
+            states_sliced = np.where(
+                np.logical_and(
+                    energies[..., np.newaxis] > outer_window[0], energies[..., np.newaxis] < outer_window[1]), unk_states, nan
+                    )
+            mask_outer = np.isnan(states_sliced)
+            masked_outer_states = np.ma.masked_array(states_sliced, mask=mask_outer)
+            outer_states = masked_outer_states
+
+        # inner window
+        if inner_window is None:
+            N_inner = 0
+        elif list(inner_window.keys())[0].lower() == 'bands':
+            inner_window_type = "bands"
+            inner_band_idxs = list(inner_window.values())[0]
+            inner_band_energies = energies[..., inner_band_idxs]
+            inner_window = [np.argmin(inner_band_energies), np.argmax(inner_band_energies)]
+            inner_states = unk_states.take(inner_band_idxs, axis=-2)
+            N_inner = len(inner_band_idxs)
+        elif list(inner_window.keys())[0].lower() == 'energy':
+            inner_window_type = "energy"
+            inner_window =  np.sort(list(outer_window.values())[0])
+            nan = np.empty(unk_states.shape)
+            nan.fill(np.NaN)
+            states_sliced = np.where(
+                np.logical_and(
+                    energies[..., np.newaxis] > inner_window[0], energies[..., np.newaxis] < inner_window[1]), unk_states, nan
+                    )
+            mask_inner = np.isnan(states_sliced)
+            masked_inner_states = np.ma.masked_array(states_sliced, mask=mask_inner)
+            inner_states = masked_inner_states
+
+        # minimization manifold
+        if inner_window is not None:
+            if inner_window_type == 'energy' and outer_window_type == 'energy':
+                min_mask = ~np.logical_and(~mask_outer, mask_inner)
+                min_states = np.ma.masked_array(unk_states, mask=min_mask)
+            elif inner_window_type == 'bands' and outer_window_type == 'bands':
+                min_band_idxs = list(np.setdiff1d(outer_band_idxs, inner_band_idxs))
+                min_states = unk_states.take(min_band_idxs, axis=-2)
+        else:
+            min_states = outer_states
+        
+        #### Start of minimization iteration ####
 
         # states spanning optimal subspace minimizing gauge invariant spread
         states_min = np.zeros((*nks, N_wfs-N_inner, n_orb), dtype=complex)
@@ -943,14 +1010,51 @@ class Wannier():
         #     ret_pckg.append(spread)
         # return ret_pckg
 
+    def interp_energies(self, k_path, ret_eigvecs=False):
+        u_tilde = self.get_tilde_states()["Cell periodic"]
+        H_k = self.get_Bloch_Ham()
+        H_rot_k = u_tilde[..., :, :].conj() @ H_k @ np.transpose(u_tilde[..., : ,:], axes=(0,1,3,2))
+
+        k_mesh = self.K_mesh.full_mesh
+        k_idx_arr = self.K_mesh.idx_arr
+        nkx, nky = self.K_mesh.nks
+        Nk = np.prod([self.K_mesh.nks])
+
+        supercell = np.array([
+            (i,j) 
+            for i in range(-int((nkx-nkx%2)/2), int((nkx-nkx%2)/2)) for j in range(-int((nky-nky%2)/2), int((nky-nky%2)/2))
+            ])
+
+        H_R = np.zeros((supercell.shape[0], H_rot_k.shape[-1], H_rot_k.shape[-1]), dtype=complex)
+        for idx, (x, y) in enumerate(supercell):
+            for k_idx in k_idx_arr:
+                R_vec = np.array([x, y])
+                phase = np.exp(-1j * 2 * np.pi * np.vdot(k_mesh[k_idx], R_vec))
+                H_R[idx, :, :] += H_rot_k[k_idx] * phase / Nk
+
+        H_k_interp = np.zeros((k_path.shape[0], H_R.shape[-1], H_R.shape[-1]), dtype=complex)
+        for k_idx, k in enumerate(k_path):
+            for idx, (x, y) in enumerate(supercell):
+                R_vec = np.array([x, y])
+                phase = np.exp(1j * 2 * np.pi * np.vdot(k, R_vec))
+                H_k_interp[k_idx] += H_R[idx] * phase
+
+        eigvals, eigvecs = np.linalg.eigh(H_k_interp)
+
+        if ret_eigvecs:
+            return eigvals, eigvecs
+        else:
+            return eigvals
+
+
     def report(self):
         assert hasattr(self, 'WFs'), "First need to set Wannier functions"
-        print("Wannier function report:")
+        print("Wannier function report")
         print(" --------------- ")
         print(rf"Quadratic spread = {self.spread}")
         print(rf"Omega_i = {self.omega_i}")
         print(rf"Omega_tilde = {self.omega_til}")
-        print(f"Wannier centers = {self.centers}")
+        print(f"Wannier centers: \n {self.centers}")
 
 
     def plot(
