@@ -846,7 +846,7 @@ class Wannier():
      ####### Maximally Localized WF ############
 
     def find_optimal_subspace(
-        self, init_states: Bloch, N_wfs=None, inner_window=None, outer_window="occupied", 
+        self, N_wfs=None, inner_window=None, outer_window="occupied", 
         iter_num=100, verbose=False, tol=1e-10, alpha=1
     ):
         # useful constants
@@ -858,6 +858,9 @@ class Wannier():
         # eigenenergies and eigenstates for inner/outer window
         energies = self.energy_eigstates.get_energies()
         unk_states = self.energy_eigstates.get_states()["Cell periodic"]
+
+        # initial subspace
+        init_states = self.tilde_states
       
         #### Setting inner/outer energy windows ####
 
@@ -969,8 +972,9 @@ class Wannier():
             N_inner = (~inner_states.mask).sum(axis=(-1,-2))//n_orb
 
         if inner_window_type == "bands" and outer_window_type == "bands":
+            # defer to the faster function
             return self.find_optimal_subspace_bands(
-                init_states, N_wfs=N_wfs, inner_bands=inner_band_idxs, outer_bands=outer_band_idxs, 
+                N_wfs=N_wfs, inner_bands=inner_band_idxs, outer_bands=outer_band_idxs, 
                 iter_num=iter_num, verbose=verbose, tol=tol, alpha=alpha)
 
         # minimization manifold
@@ -1105,7 +1109,7 @@ class Wannier():
         
 
     def find_optimal_subspace_bands(
-        self, init_states: Bloch, N_wfs=None, inner_bands=None, outer_bands="occupied", 
+        self, N_wfs=None, inner_bands=None, outer_bands="occupied", 
         iter_num=100, verbose=False, tol=1e-10, alpha=1
     ):
         """Finds the subspaces throughout the BZ that minimizes the gauge-independent spread. 
@@ -1123,6 +1127,9 @@ class Wannier():
         w_b, _, idx_shell = self.K_mesh.get_weights(N_sh=1)
         num_nnbrs = self.K_mesh.num_nnbrs
         bc_phase = self.K_mesh.bc_phase
+
+        # initial subspace
+        init_states = self.tilde_states
 
         if N_wfs is None:
             # assume we want the number of states in the manifold to be the number of tilde states 
@@ -1327,10 +1334,11 @@ class Wannier():
 
     def max_loc(
         self,
-        N_wfs=None,
         outer_window="occupied",
         inner_window=None,
-        twf_list=None,
+        twfs_omega_i=None,
+        twfs_omega_til=None,
+        N_wfs=None,
         iter_num_omega_i=1000,
         iter_num_omega_til=1000,
         eps=1e-3,
@@ -1347,22 +1355,21 @@ class Wannier():
             outer_states_idxs(list | str): Band indices for the disentanglement manifold. If "occupied", 
                 will use the occupied manifold. Defaults to "occupied".
             verbose(bool): Whether to print spread during minimization.
-
         """
 
-        if not hasattr(self.tilde_states, "_u_wfs"):
-            assert twf_list is not None, "Need pass trial wavefunction list or initalize tilde states with single_shot()."
+        if twfs_omega_i is not None:
             # initialize tilde states
-            twfs = self.get_trial_wfs(twf_list)
+            twfs = self.get_trial_wfs(twfs_omega_i)
             n_occ = int(self.energy_eigstates._n_states / 2)  # assuming half filled
             band_idxs = list(range(0, n_occ))
             psi_til_init = self.get_psi_tilde(
                 self.energy_eigstates._psi_wfs, twfs, state_idx=band_idxs)
             self.set_tilde_states(psi_til_init, cell_periodic=False)
+        else:
+            assert hasattr(self.tilde_states, "_u_wfs"), "Need pass trial wavefunction list or initalize tilde states with single_shot()."
         
         # Minimizing Omega_I via disentanglement
         util_min_Wan = self.find_optimal_subspace(
-            self.tilde_states,
             N_wfs=N_wfs,
             outer_window=outer_window,
             inner_window=inner_window,
@@ -1374,9 +1381,9 @@ class Wannier():
         print("min omegai", self.tilde_states._u_wfs.shape)
         self.report()
 
-        # Projection
-        if twf_list is not None:
-            twfs = self.get_trial_wfs(twf_list)
+        # Second projection
+        if twfs_omega_til is not None:
+            twfs = self.get_trial_wfs(twfs_omega_til)
             psi_til_til_min = self.get_psi_tilde(
                 self.tilde_states._psi_wfs, twfs, 
                 state_idx=list(range(self.tilde_states._psi_wfs.shape[2]))
