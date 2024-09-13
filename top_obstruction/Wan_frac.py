@@ -25,7 +25,7 @@ u_wfs_full = wf_array(model, [20, 20])
 u_wfs_full.solve_on_grid([0, 0])
 chern = u_wfs_full.berry_flux([i for i in range(n_occ)])/(2*np.pi)
 
-name = f'C={chern:.1f}_Delta={delta}_t0={t0}_tprime={tprime}_n_occ={n_occ}'
+name = f'Wan_frac_C={chern:.1f}_Delta={delta}_t0={t0}_tprime={tprime}_n_occ={n_occ}'
 
 sv_dir = 'data'
 if not os.path.exists(sv_dir):
@@ -40,7 +40,7 @@ for idx, n_tf in enumerate(n_tfs):
 
     tf_list = np.random.choice(low_E_sites, n_tf, replace=False) # ["random", n_tf]
     WFs = Wannier(model, [20, 20])
-    WFs.Wannierize(tf_list)
+    WFs.single_shot(tf_list)
 
     WFs.max_loc(
         verbose=True, iter_num_omega_i=10000, iter_num_omega_til=50000, 

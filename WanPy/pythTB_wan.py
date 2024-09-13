@@ -34,6 +34,9 @@ class Lattice():
         for idx, pos in enumerate(self._orbs):
             print(f"{idx} ===> {pos}")
 
+    def get_lat_vecs(self):
+        return self._lat_vecs
+
     def get_recip_lat_vecs(self):
         """Returns reciprocal lattice vectors."""
         b = 2 * np.pi * np.linalg.inv(self._lat_vecs).T
@@ -370,7 +373,7 @@ class Bloch():
             self._u_wfs = self.apply_phase(wfs, inverse=True)
 
         self._n_states = self._u_wfs.shape[-2]
-        self._M = self.k_overlap_mat()
+        self._M = self.self_overlap_mat()
 
         nks = self.K_mesh.nks
         n_orb = self.Lattice._n_orb
@@ -411,7 +414,7 @@ class Bloch():
         return wfsxphase
     
     
-    def k_overlap_mat(self):
+    def self_overlap_mat(self):
         """
         Compute the overlap matrix of the cell periodic eigenstates. Assumes that the last u_wf
         along each periodic direction corresponds to the next to last k-point in the
@@ -435,6 +438,23 @@ class Bloch():
             states_pbc = np.roll(self._u_wfs, shift=tuple(-idx_vec), axis=(0,1)) * bc_phase[..., idx, np.newaxis,  :]
             M[..., idx, :, :] = np.einsum("...mj, ...nj -> ...mn", self._u_wfs.conj(), states_pbc)
         return M
+    
+    def tf_overlap_mat(self, psi_wfs, tfs, state_idx):
+        """
+        Returns A_{k, n, j} = <psi_{n,k} | t_{j}> where psi are Bloch states and t are
+        the trial wavefunctions.
+
+        Args:
+            psi_wfs (np.array): Bloch eigenstates
+            tfs (np.array): trial wfs
+            state_idx (list): band indices to form overlap matrix with
+
+        Returns:
+            A (np.array): overlap matrix
+        """
+        psi_wfs = np.take(psi_wfs, state_idx, axis=-2)
+        A = np.einsum("...ij, kj -> ...ik", psi_wfs.conj(), tfs)
+        return A
     
     def plot_bands(
         self, k_path, 
@@ -531,8 +551,14 @@ class Wannier():
         return self.tilde_states.get_states()
     
     def get_Bloch_Ham(self):
-        return self.tilde_states.get_Bloch_Ham()    
+        return self.tilde_states.get_Bloch_Ham() 
 
+    def get_centers(self, Cartesian=False):
+        if Cartesian:
+            return self.centers
+        else:
+            return self.centers @ np.linalg.inv(self.Lattice._lat_vecs)
+           
     def get_trial_wfs(self, tf_list):
         """
         Args:
@@ -611,13 +637,8 @@ class Wannier():
         Returns:
             A (np.array): overlap matrix
         """
-
-        ntfs = tfs.shape[0]
-        A = np.zeros((*self.K_mesh.nks, len(state_idx), ntfs), dtype=complex)
-        for n in state_idx:
-            for j in range(ntfs):
-                A[..., n, j] = psi_wfs.conj()[..., n, :] @ tfs[j, :]
-
+        psi_wfs = np.take(psi_wfs, state_idx, axis=-2)
+        A = np.einsum("...ij, kj -> ...ik", psi_wfs.conj(), tfs)
         return A
     
     
@@ -1057,7 +1078,15 @@ class Wannier():
             states_min = np.einsum('...ji, ...ik->...jk', sorted_eigvecs, min_states)
             # states_min = sorted_eigvecs @ min_states
             keep_states = np.ma.masked_array(states_min, mask=keep_mask)
+
+            # min_keep = np.ma.masked_array(keep_states, mask=keep_mask)
+            # subspace = np.ma.concatenate((min_keep, inner_states), axis=-2)
+            # subspace_sliced = subspace[np.where(~subspace.mask)]
+            # subspace_sliced = subspace_sliced.reshape((*nks, N_wfs, n_orb))
+            # subspace_sliced = np.array(subspace_sliced)
+
             keep_states = np.ma.filled(keep_states, fill_value=0)
+
             # print("states_min[0,0]: ", states_min[0,0].round(5))
             # print("Keep_states[0,0]: ", keep_states[0,0].round(5))
             # exit()
@@ -1466,7 +1495,8 @@ class Wannier():
         for i, spread in enumerate(self.spread):
             print(f"w_{i} --> {spread.round(5)}")
         print("Centers:")
-        for i, center in enumerate(self.centers):
+        centers = self.get_centers()
+        for i, center in enumerate(centers):
             print(f"w_{i} --> {center.round(5)}")
         print(rf"Omega_i = {self.omega_i}")
         print(rf"Omega_tilde = {self.omega_til}")
