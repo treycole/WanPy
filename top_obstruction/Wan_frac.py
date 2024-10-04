@@ -23,7 +23,6 @@ t2 = -0.4
 n_super_cell = 5
 model = models.Haldane(delta, t, t2).make_supercell([[n_super_cell, 0], [0, n_super_cell]])
 
-
 low_E_sites = np.arange(0, model.get_num_orbitals(), 2)
 n_orb = model.get_num_orbitals()
 n_occ = int(n_orb/2)

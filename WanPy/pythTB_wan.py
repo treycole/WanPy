@@ -81,9 +81,9 @@ class K_mesh():
         self.Lattice: Lattice = Lattice(model)
         self.nks = nks
         self.dim: int = len(nks)
-        self.idx_arr: list = list(product(*[range(nk) for nk in nks]))  # 1D list of all k_indices
-        self.full_mesh: np.ndarray = self.gen_k_mesh(flat=False, endpoint=False)
-        self.flat_mesh: np.ndarray = self.gen_k_mesh(flat=True, endpoint=False)
+        self.idx_arr: list = list(product(*[range(nk) for nk in nks]))  # 1D list of all k_indices (integers)
+        self.full_mesh: np.ndarray = self.gen_k_mesh(flat=False, endpoint=False) # each index is a direction in k-space
+        self.flat_mesh: np.ndarray = self.gen_k_mesh(flat=True, endpoint=False) # 1D list of k-vectors
 
         # nearest neighbor k-shell
         self.nnbr_w_b, _, self.nnbr_idx_shell = self.get_weights(N_sh=1)
@@ -146,7 +146,7 @@ class K_mesh():
                 Array of vectors of integers used for indexing the nearest neighboring k-mesh points
                 to a given k-mesh point.
         """
-        # basis vectors connecting neighboring mesh points (in inverse lattice vector units)
+        # basis vectors connecting neighboring mesh points (in inverse Cartesian units)
         dk = np.array([self.Lattice._recip_lat_vecs[i] / nk for i, nk in enumerate(self.nks)])
         # array of integers e.g. in 2D for N_sh = 1 would be [0,1], [1,0], [0,-1], [-1,0]
         nnbr_idx = list(product(list(range(-N_sh, N_sh + 1)), repeat=len(self.nks)))
@@ -228,10 +228,6 @@ class K_mesh():
                 counter-clockwise (e.g. square lattice 0 --> [1, 0], 1 --> [0, 1] etc.)
 
         """
-        # k_idx_arr = list(
-        #     product(*[range(nk) for nk in self.nks])
-        # )  # all pairwise combinations of k_indices
-        # k_idx_arr = self.idx_arr
         idx_shell = self.nnbr_idx_shell
         bc_phase = np.ones((*self.nks, idx_shell[0].shape[0], self.Lattice._orbs.shape[0]), dtype=complex)
         for k_idx in self.idx_arr:
@@ -305,6 +301,7 @@ class Bloch():
         u_wfs = wf_array(self.model, [*self.K_mesh.nks])
         energies = np.empty([*self.K_mesh.nks, self.Lattice._n_orb])
         for k_idx in self.K_mesh.idx_arr:
+            #TODO: can condense to single line with eig_vectors=True
             energies[k_idx] = self.model.solve_one(self.K_mesh.full_mesh[k_idx], eig_vectors=False)
             u_wfs.solve_on_one_point(self.K_mesh.full_mesh[k_idx], [*k_idx])
         u_wfs = np.array(u_wfs._wfs, dtype=complex)
@@ -394,6 +391,7 @@ class Bloch():
                     "...ni, ...nj -> ...ij", states_pbc, states_pbc.conj()
                     )
             self._Q_nbr[..., idx, :, :] = np.eye(n_orb) - self._P_nbr[..., idx, :, :]
+
                 
     def apply_phase(self, wfs, inverse=False):
         """
@@ -418,8 +416,7 @@ class Bloch():
         """
         Compute the overlap matrix of the cell periodic eigenstates. Assumes that the last u_wf
         along each periodic direction corresponds to the next to last k-point in the
-        mesh (excludes endpoints). This way, the periodic boundary conditions are handled
-        internally.
+        mesh (excludes endpoints). 
 
         Returns:
             M (np.array): overlap matrix
@@ -439,6 +436,7 @@ class Bloch():
             M[..., idx, :, :] = np.einsum("...mj, ...nj -> ...mn", self._u_wfs.conj(), states_pbc)
         return M
     
+    
     def overlap_mat(self, psi_wfs, tfs, state_idx):
         """
         Returns A_{k, n, j} = <psi_{n,k} | t_{j}> where psi are Bloch states and t are
@@ -456,25 +454,21 @@ class Bloch():
         A = np.einsum("...ij, kj -> ...ik", psi_wfs.conj(), tfs)
         return A
     
+    
     def plot_bands(
         self, k_path, 
         nk=101, k_label=None, title=None, scat_size=3, lw=3, lc='b', 
-        save_name=None, sub_lat=False, red_lat_idx=None, blue_lat_idx=None, 
+        save_name=None, red_lat_idx=None, 
         fig=None, ax=None, show=False
         ):
         """
 
         Args:
-            model (pythtb.model):
-            k_path (list): list of high symmetry points to interpolate
-            evals (np.array, optional): If specifying, indices must correspond to interpolated path.
-            evecs (np.array, optional): If specifying, indices must correspond to interpolated path.
-            k_label (_type_, optional): _description_. Defaults to None.
-            title (_type_, optional): _description_. Defaults to None.
-            save_name (_type_, optional): _description_. Defaults to None.
-            sub_lat (bool, optional): _description_. Defaults to False.
-            red_lat_idx (_type_, optional): _description_. Defaults to None.
-            blue_lat_idx (_type_, optional): _description_. Defaults to None.
+            k_path (list): List of high symmetry points to plot bands through
+            k_label (list[str], optional): Labels of high symmetry points. Defaults to None.
+            title (str, optional): _description_. Defaults to None.
+            save_name (str, optional): _description_. Defaults to None.
+            red_lat_idx (list, optional): _description_. Defaults to None.
             show (bool, optional): _description_. Defaults to False.
 
         Returns:
@@ -488,12 +482,12 @@ class Bloch():
         (k_vec, k_dist, k_node) = self.model.k_path(k_path, nk, report=False)
         # diagonalize model on path
         evals, evecs = self.model.solve_all(k_vec, eig_vectors=True)
-        evecs = np.transpose(evecs, axes=(1, 0, 2)) #[k, n, orb]
-        evals = np.transpose(evals, axes=(1, 0)) #[k, n]
+        evecs = np.transpose(evecs, axes=(1, 0, 2)) # [k, n, orb]
+        evals = np.transpose(evals, axes=(1, 0)) # [k, n]
         n_eigs = evecs.shape[1]
 
-        if sub_lat:
-            # scattered bands with sublattice color
+        # scattered bands with sublattice color
+        if red_lat_idx is not None:
             wt = abs(evecs)**2
             col = np.sum([  wt[..., i] for i in red_lat_idx ], axis=0)
 
@@ -506,7 +500,7 @@ class Bloch():
         else:
             # continuous bands
             for n in range(n_eigs):
-                ax.plot(k_dist, evals[:, n], c='blue', lw=3)
+                ax.plot(k_dist, evals[:, n], c=lc, lw=lw)
 
         ax.set_xlim(0, k_node[-1])
         ax.set_xticks(k_node)
@@ -611,7 +605,15 @@ class Wannier():
     
     
     def set_tilde_states(self, tilde_states, cell_periodic=False):
+        # set tilde states
         self.tilde_states.set_wfs(tilde_states, cell_periodic=cell_periodic)
+
+        # Fourier transform Bloch-like states to set WFs
+        psi_wfs = self.tilde_states._psi_wfs
+        dim_k = len(psi_wfs.shape[:-2])
+        self.WFs = np.fft.ifftn(psi_wfs, axes=[i for i in range(dim_k)], norm=None)
+
+        # set spreads
         spread = self.spread_recip(decomp=True)
         self.spread = spread[0][0]
         self.omega_i = spread[0][1]
@@ -651,7 +653,7 @@ class Wannier():
         # slice psi_wf to keep only occupied bands
         psi_tilde = (V @ Wh).transpose(
             *([i for i in range(self.K_mesh.dim)] + [self.K_mesh.dim + 1, self.K_mesh.dim])
-        ) @ psi_wfs[..., state_idx, :]  # [*nk_i, nband, norb]
+        ) @ psi_wfs[..., state_idx, :]  # [*nk, nband, norb]
 
         return psi_tilde
     
@@ -720,10 +722,9 @@ class Wannier():
         expc_rsq = 0  # <r^2>
         expc_r_sq = 0  # <\vec{r}>^2
 
-        for n in range(n_wfs):  # "band" index
+        for n in range(n_wfs):  # Wannier index
             for tx, ty in supercell:  # cells in supercell
                 for i, orb in enumerate(self.Lattice._orbs):  # values of Wannier function on lattice
-                    # ( orb + vec(t) ) @ lat_vecs
                     pos = (orb[0] + tx) * self.Lattice._lat_vecs[0] + (orb[1] + ty) * self.Lattice._lat_vecs[1]  # position
                     r = np.sqrt(pos[0] ** 2 + pos[1] ** 2)
 
@@ -1018,12 +1019,6 @@ class Wannier():
 
         N_min = (~min_states.mask).sum(axis=(-1,-2))//n_orb
         N_outer = (~masked_outer_states.mask).sum(axis=(-1,-2))//n_orb
-        print(N_inner)
-        print(N_min)
-        print(N_outer)
-        print(keep_mask[0,0])
-        print(min_states[0,0].round(5))
-        # exit()
 
         # Assumes only one shell for now
         w_b, _, idx_shell = self.K_mesh.get_weights(N_sh=1)
@@ -1048,13 +1043,9 @@ class Wannier():
             Z = min_states.conj() @ P_avg @ np.transpose(min_states, axes=(0,1,3,2))
             # masked entries correspond to subspace spanned by states outside min manifold
             Z = np.ma.filled(Z, fill_value=0)
-            # print("P_Avg[0,0]: ", P_avg[0,0].round(5))
-            # print("Z[0,0]: ", Z[0,0].round(5))
 
             eigvals, eigvecs = np.linalg.eigh(Z) # [..., val, idx]
             eigvecs = np.swapaxes(eigvecs, axis1=-1, axis2=-2) # [..., idx, val]
-            # print(eigvals[0,0])
-            # print(eigvecs[0,0].round(5))
 
             # eigvals = 0 correspond to states outside the minimization manifold. Mask these out.
             zero_mask = eigvals.round(10) == 0
@@ -1066,25 +1057,11 @@ class Wannier():
             sorted_eigvals = np.take_along_axis(non_zero_eigvals, sorted_eigvals_idxs, axis=-1)
             sorted_eigvecs = np.take_along_axis(non_zero_eigvecs, sorted_eigvals_idxs[..., np.newaxis], axis=-2)
             sorted_eigvecs = np.ma.filled(sorted_eigvecs, fill_value=0)
-            # print(eigvals[0,0])
-            # print("sorted eigenvalues[0,0]: ", sorted_eigvals[0,0])
-            # print("sorted eigenvectors[0,0]: ", sorted_eigvecs[0,0].round(5))
 
             states_min = np.einsum('...ji, ...ik->...jk', sorted_eigvecs, min_states)
-            # states_min = sorted_eigvecs @ min_states
             keep_states = np.ma.masked_array(states_min, mask=keep_mask)
-
-            # min_keep = np.ma.masked_array(keep_states, mask=keep_mask)
-            # subspace = np.ma.concatenate((min_keep, inner_states), axis=-2)
-            # subspace_sliced = subspace[np.where(~subspace.mask)]
-            # subspace_sliced = subspace_sliced.reshape((*nks, N_wfs, n_orb))
-            # subspace_sliced = np.array(subspace_sliced)
-
             keep_states = np.ma.filled(keep_states, fill_value=0)
-
-            # print("states_min[0,0]: ", states_min[0,0].round(5))
-            # print("Keep_states[0,0]: ", keep_states[0,0].round(5))
-            # exit()
+            # need to concatenate with frozen states
 
             P_new = np.einsum("...ni,...nj->...ij", keep_states, keep_states.conj())
             P_min = alpha * P_new + (1 - alpha) * P_min # for next iteration
@@ -1278,7 +1255,9 @@ class Wannier():
         return expM
     
     
-    def find_min_unitary(self, eps=1e-3, iter_num=100, verbose=False, tol=1e-10, grad_min=1e-3):
+    def find_min_unitary(
+            self, eps=1e-3, iter_num=100, verbose=False, tol=1e-10, grad_min=1e-3
+        ):
         """
         Finds the unitary that minimizing the gauge dependent part of the spread. 
 
@@ -1338,8 +1317,7 @@ class Wannier():
                 print(
                 f"{i} Omega_til = {omega_tilde_new.real}, Grad mag: {grad_mag}"
                 )
-                u_max_loc = np.einsum('...ji, ...jm -> ...im', U, u_wfs)
-                return u_max_loc, U
+                return U
             
             if grad_mag_prev < grad_mag and i!=0:
                 print("Warning: Gradient increasing.")
@@ -1351,40 +1329,21 @@ class Wannier():
             grad_mag_prev = grad_mag
             omega_tilde_prev = omega_tilde_new
 
+        return U
+    
 
-        u_max_loc = np.einsum('...ji, ...jm -> ...im', U, u_wfs)
-        return u_max_loc, U
-
-    def max_loc(
-        self,
-        outer_window="occupied",
-        inner_window=None,
-        twfs_omega_i=None,
-        twfs_omega_til=None,
-        N_wfs=None,
-        iter_num_omega_i=1000,
-        iter_num_omega_til=1000,
-        eps=1e-3,
-        tol_omega_i=1e-5,
-        tol_omega_til=1e-10,
-        grad_min=1e-3,
-        alpha=1,
-        verbose=False,
+    def subspace_selec(
+        self, outer_window="occupied", inner_window=None, twfs=None,
+        N_wfs=None, iter_num=1000, tol=1e-5, alpha=1, verbose=False
     ):
-        """
-        Find the maximally localized Wannier functions using the projection method.
-
-        Args:
-            outer_states_idxs(list | str): Band indices for the disentanglement manifold. If "occupied", 
-                will use the occupied manifold. Defaults to "occupied".
-            verbose(bool): Whether to print spread during minimization.
-        """
-
-        if twfs_omega_i is not None:
+        # if we haven't done single-shot projection yet (set tilde states)
+        if twfs is not None:
             # initialize tilde states
-            twfs = self.get_trial_wfs(twfs_omega_i)
+            twfs = self.get_trial_wfs(twfs)
+
             n_occ = int(self.energy_eigstates._n_states / 2)  # assuming half filled
-            band_idxs = list(range(0, n_occ))
+            band_idxs = list(range(0, n_occ)) # project onto occ manifold
+
             psi_til_init = self.get_psi_tilde(
                 self.energy_eigstates._psi_wfs, twfs, state_idx=band_idxs)
             self.set_tilde_states(psi_til_init, cell_periodic=False)
@@ -1396,49 +1355,86 @@ class Wannier():
             N_wfs=N_wfs,
             outer_window=outer_window,
             inner_window=inner_window,
-            iter_num=iter_num_omega_i,
-            verbose=verbose, alpha=alpha, tol=tol_omega_i
+            iter_num=iter_num,
+            verbose=verbose, alpha=alpha, tol=tol
         )
-    
-        self.set_tilde_states(util_min_Wan, cell_periodic=True)
-        # print("min omegai", self.tilde_states._u_wfs.shape)
-        # self.report()
 
-        # Second projection
-        if twfs_omega_til is not None:
-            twfs = self.get_trial_wfs(twfs_omega_til)
-            psi_til_til_min = self.get_psi_tilde(
+        self.set_tilde_states(util_min_Wan, cell_periodic=True)
+
+        return
+    
+    def max_loc(
+        self, eps=1e-3, iter_num=1000, tol=1e-5, grad_min=1e-3, verbose=False   
+    ):
+        u_tilde_wfs = self.tilde_states._u_wfs
+
+        U = self.find_min_unitary(
+            eps=eps, iter_num=iter_num, verbose=verbose, tol=tol, grad_min=grad_min)
+        print(U.shape, u_tilde_wfs.shape)
+        
+        u_max_loc = np.einsum('...ji, ...jm -> ...im', U, u_tilde_wfs)
+        
+        self.set_tilde_states(u_max_loc, cell_periodic=True)
+        
+        return
+
+    def ss_maxloc(
+        self,
+        outer_window="occupied",
+        inner_window=None,
+        twfs_1=None,
+        twfs_2=None,
+        N_wfs=None,
+        iter_num_omega_i=1000,
+        iter_num_omega_til=1000,
+        eps=1e-3,
+        tol_omega_i=1e-5,
+        tol_omega_til=1e-10,
+        grad_min=1e-3,
+        alpha=1,
+        verbose=False,
+    ):
+        """ Find the maximally localized Wannier functions using the projection method.
+        """
+
+        ### Subspace selection ###
+        self.subspace_selec(
+            outer_window=outer_window,
+            inner_window=inner_window, 
+            twfs=twfs_1, 
+            N_wfs=N_wfs, 
+            iter_num=iter_num_omega_i,
+            tol=tol_omega_i, 
+            alpha=alpha, 
+            verbose=verbose
+        )
+
+        ### Second projection ###
+        # if we need a smaller number of twfs b.c. of subspace selec
+        if twfs_2 is not None:
+            twfs = self.get_trial_wfs(twfs_2)
+            psi_til_til = self.get_psi_tilde(
                 self.tilde_states._psi_wfs, twfs, 
                 state_idx=list(range(self.tilde_states._psi_wfs.shape[2]))
             )
+        # chose same twfs as in subspace selec
         else:
-            psi_til_til_min = self.get_psi_tilde(
+            psi_til_til = self.get_psi_tilde(
                     self.tilde_states._psi_wfs, self.trial_wfs, 
                     state_idx=list(range(self.tilde_states._psi_wfs.shape[2]))
                 )
 
-        self.set_tilde_states(psi_til_til_min, cell_periodic=False)
-        # print("2nd proj", self.tilde_states._u_wfs.shape)
-        # self.report()
-
-        # Finding optimal gauge
-        u_max_loc, _ = self.find_min_unitary(
-            eps=eps, iter_num=iter_num_omega_til, verbose=verbose, tol=tol_omega_til, grad_min=grad_min)
+        self.set_tilde_states(psi_til_til, cell_periodic=False)
+    
+        ### Finding optimal gauge with maxloc ###
+        self.max_loc(
+            eps=eps, 
+            iter_num=iter_num_omega_til, 
+            tol=tol_omega_til,
+            grad_min=grad_min
+            )
         
-        self.set_tilde_states(u_max_loc, cell_periodic=True)
-        # print("min omegatil", self.tilde_states._u_wfs.shape)
-
-        # Fourier transform Bloch-like states
-        psi_wfs = self.tilde_states._psi_wfs
-        dim_k = len(psi_wfs.shape[:-2])
-        # DFT
-        self.WFs = np.fft.ifftn(psi_wfs, axes=[i for i in range(dim_k)], norm=None)
-
-        # spread = self.spread_recip(decomp=True)
-        # self.spread = spread[0][0]
-        # self.omega_i = spread[0][1]
-        # self.omega_til = spread[0][2]
-        # self.centers = spread[1]
+        return
 
 
     def interp_energies(self, k_path, wan_idxs=None, ret_eigvecs=False):
@@ -1494,6 +1490,7 @@ class Wannier():
             print(f"w_{i} --> {center.round(5)}")
         print(rf"Omega_i = {self.omega_i}")
         print(rf"Omega_tilde = {self.omega_til}")
+        
         
     def get_supercell(self, Wan_idx, omit_sites=None):
         w0 = self.WFs
@@ -1571,11 +1568,12 @@ class Wannier():
 
 
     def plot_density(
-        self, Wan_idx, plot_phase=False,
+        self, Wan_idx,
         title=None, save_name=None, mark_home_cell=False,
         mark_center=False, show_lattice=True, omit_sites=None,
         show=False, interpolate=False,
-        scatter_size=40, lat_size=2, fig=None, ax=None, cbar=True, return_fig=False):
+        scatter_size=40, lat_size=2, fig=None, ax=None, cbar=True, return_fig=False
+        ):
 
         center = self.centers[Wan_idx]
 
@@ -1772,23 +1770,21 @@ class Wannier():
         if return_fig:
             return fig, ax
         
-    
-    def plot_centers(
-        self, mark_home_cell=False, 
-        omit_sites=None, translate_centers=False,
-        title=None, save_name=None, 
-        show=False, legend=False, s_lat=40, s_omit=50, s_centers=80
-    ):
 
-        orbs = self.Lattice._orbs
-        lat_vecs = self.Lattice._lat_vecs
+    def plot_centers(
+        self, omit_sites=None, 
+        section_home_cell=True, color_home_cell=True, translate_centers=False,
+        title=None, save_name=None, show=False, legend=False, pmx=4, pmy=4,
+        kwargs_centers={'s': 80, 'marker': '*', 'c': 'g'},
+        kwargs_omit={'s': 50, 'marker': 'x', 'c':'k'},
+        kwargs_lat={'s':10, 'marker': 'o', 'c':'k'}, fig=None, ax=None
+    ):
+        lat_vecs = self.Lattice.get_lat_vecs()
+        orbs = self.Lattice.get_orb(Cartesian=False)
         w0 = self.WFs
         centers = self.centers
 
         nx, ny = w0.shape[0], w0.shape[1]
-
-        if not hasattr(self, "positions"):
-            self.get_supercell(0, omit_sites=omit_sites)
 
         supercell = [(i,j) for i in range(-int((nx-nx%2)/2), int((nx-nx%2)/2)) 
                     for j in range(-int((ny-ny%2)/2), int((ny-ny%2)/2))]
@@ -1865,20 +1861,16 @@ class Wannier():
         xs_odd = positions['odd']['xs']
         ys_odd = positions['odd']['ys']
 
-                    
-        figs = []
-        axs = []
-
-        fig, ax = plt.subplots()
-        figs.append(fig)
-        axs.append(ax)
+        
+        if fig is None:
+            fig, ax = plt.subplots()
 
         # Weight plot
 
         if omit_sites is not None :
-            ax.scatter(xs_omit, ys_omit, s=s_omit, marker='x', c='k')
+            ax.scatter(xs_omit, ys_omit, **kwargs_omit)
 
-        if mark_home_cell:
+        if color_home_cell:
             # Zip the home cell coordinates into tuples
             home_ev_coords = set(zip(xs_ev_home, ys_ev_home))
 
@@ -1898,40 +1890,64 @@ class Wannier():
                 xs_odd_out, ys_odd_out = zip(*out_odd)
             else:
                 xs_odd_out, ys_odd_out = [], []  # In case no points are left
-                
-            ax.scatter(xs_ev_out, ys_ev_out, marker='o', c='k', s=s_lat, zorder=2)
-            ax.scatter(xs_odd_out, ys_odd_out, marker='o', s=s_lat, zorder=2, facecolors='none', edgecolors='k')
+            
+            if 'c' in kwargs_lat.keys():
+                kwargs_lat.pop('c')
+            ax.scatter(xs_ev_out, ys_ev_out, zorder=2, c='k', **kwargs_lat)
+            ax.scatter(xs_odd_out, ys_odd_out, zorder=2, facecolors='none', edgecolors='k', **kwargs_lat)
 
-            ax.scatter(xs_ev_home, ys_ev_home, marker='o', s=s_lat, zorder=2, facecolors='none', edgecolors='b')
-            ax.scatter(xs_odd_home, ys_odd_home, marker='o', s=s_lat, zorder=2, facecolors='none', edgecolors='r')
+            ax.scatter(xs_ev_home, ys_ev_home, zorder=2, c='b', **kwargs_lat)
+            ax.scatter(xs_odd_home, ys_odd_home,zorder=2, facecolors='none', edgecolors='r', **kwargs_lat)
         
         else:
-            ax.scatter(xs_ev, ys_ev, marker='o', c='k', s=s_lat, zorder=2)
-            ax.scatter(xs_odd, ys_odd, marker='o', s=s_lat, zorder=2, facecolors='none', edgecolors='k')
+            ax.scatter(xs_ev, ys_ev, zorder=2, **kwargs_lat)
+            ax.scatter(xs_odd, ys_odd, zorder=2, facecolors='none', edgecolors='k', **kwargs_lat)
 
+        # draw lines sectioning out home supercell
+        if section_home_cell:
+            c1 = np.array([0,0])
+            c2 = c1 + lat_vecs[0]
+            c3 = c1 + lat_vecs[1]
+            c4 = c1 + lat_vecs[0] + lat_vecs[1]
+
+            ax.plot([c1[0], c2[0]], [c1[1], c2[1]], c='k', ls='--', lw=1)
+            ax.plot([c1[0], c3[0]], [c1[1], c3[1]], c='k', ls='--', lw=1)
+            ax.plot([c3[0], c4[0]], [c3[1], c4[1]], c='k', ls='--', lw=1)
+            ax.plot([c2[0], c4[0]], [c2[1], c4[1]], c='k', ls='--', lw=1)
+
+        # scatter centers
         for i in range(centers.shape[0]):
             if translate_centers:
                 x = positions['centers']['xs'][i]
                 y = positions['centers']['ys'][i]
+                # label = fr"Center $\mathbf{{r}}^{{({i})}}_c = ({center[0]: .3f}, {center[1]: .3f})$"
+                if i ==0:
+                    label = "Wannier centers"
+                else:
+                    label=None
                 ax.scatter(
-                    x, y, c='g', marker='*', s=80, zorder=1, 
-                    label=fr"Center $\mathbf{{r}}^{{({i})}}_c = ({center[0]: .3f}, {center[1]: .3f})$")
+                    x, y, zorder=1, label=label, **kwargs_centers)
             else:
                 center = centers[i]
+                label = "Wannier centers"
                 ax.scatter(
-                    center[0], center[1], c='g', marker='*', s=80, zorder=1, 
-                    label=fr"Center $\mathbf{{r}}^{{({i})}}_c = ({center[0]: .3f}, {center[1]: .3f})$")
+                    center[0], center[1], zorder=1, label=label, **kwargs_centers)
 
         if legend:
             ax.legend(loc='upper right')
+        
+        center_sc = (1/2) * (lat_vecs[0] + lat_vecs[1])
+        ax.set_xlim(center_sc[0] - pmx, center_sc[0] + pmx)
+        ax.set_ylim(center_sc[1] - pmy, center_sc[1] + pmy)
 
         ax.set_title(title)
 
         # Saving
         if save_name is not None:
-            plt.savefig(f'Wan_wt_{save_name}.png')
+            plt.savefig(f'{save_name}.png', dpi=700)
 
         if show:
             plt.show()
-
-        return figs, axs
+        
+        return fig, ax
+        
