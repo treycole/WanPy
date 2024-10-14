@@ -492,7 +492,7 @@ class Bloch():
             col = np.sum([  wt[..., i] for i in red_lat_idx ], axis=0)
 
             for n in range(n_eigs):
-                scat = ax.scatter(k_dist, evals[:, n], c=col[:, n], cmap='bwr', marker='o', s=scat_size, vmin=0, vmax=1)
+                scat = ax.scatter(k_dist, evals[:, n], c=col[:, n], cmap='bwr', marker='o', s=scat_size, vmin=0, vmax=1, zorder=2)
 
             cbar = fig.colorbar(scat, ticks=[1,0])
             cbar.ax.set_yticklabels([r'$\psi_1$', r'$\psi_2$'], size=12)
@@ -505,7 +505,7 @@ class Bloch():
         ax.set_xlim(0, k_node[-1])
         ax.set_xticks(k_node)
         for n in range(len(k_node)):
-            ax.axvline(x=k_node[n], linewidth=0.5, color='k')
+            ax.axvline(x=k_node[n], linewidth=0.5, color='k', zorder=1)
         if k_label is not None:
             ax.set_xticklabels(k_label, size=12)
         
@@ -535,6 +535,8 @@ class Wannier():
         self.energy_eigstates: Bloch = Bloch(model, *nks)
         self.energy_eigstates.solve_model()
         self.tilde_states: Bloch = Bloch(model, *nks)
+
+        self.supercell = list(product(*[range(-int((nk-nk%2)/2), int((nk-nk%2)/2)) for nk in nks]))  # used for real space looping of WFs
 
     def get_tilde_states(self):
         return self.tilde_states.get_states()
@@ -710,10 +712,6 @@ class Wannier():
         w0 = self.WFs
         # assuming 2D for now
         nx, ny, n_wfs = w0.shape[0], w0.shape[1], w0.shape[2]
-        # translation vectors in reduced units
-        supercell = [
-            (i, j) for i in range(-nx // 2, nx // 2) for j in range(-ny // 2, ny // 2)
-        ]
 
         r_n = np.zeros((n_wfs, 2), dtype=complex)  # <\vec{r}>_n
         rsq_n = np.zeros(n_wfs, dtype=complex)  # <r^2>_n
@@ -723,7 +721,7 @@ class Wannier():
         expc_r_sq = 0  # <\vec{r}>^2
 
         for n in range(n_wfs):  # Wannier index
-            for tx, ty in supercell:  # cells in supercell
+            for tx, ty in self.supercell:  # cells in supercell
                 for i, orb in enumerate(self.Lattice._orbs):  # values of Wannier function on lattice
                     pos = (orb[0] + tx) * self.Lattice._lat_vecs[0] + (orb[1] + ty) * self.Lattice._lat_vecs[1]  # position
                     r = np.sqrt(pos[0] ** 2 + pos[1] ** 2)
@@ -736,7 +734,8 @@ class Wannier():
 
                     if decomp:
                         for m in range(n_wfs):
-                            for j, [dx, dy] in enumerate(supercell):
+                            for j, [dx, dy] in enumerate(self.supercell):
+                                #TODO: shouldn't this be indexed by j? 
                                 wRm_r = w0[
                                     (tx + dx) % nx, (ty + dy) % ny, m, i
                                 ]  # translated Wannier function
@@ -752,7 +751,7 @@ class Wannier():
             Omega_inv = expc_rsq - sigma_Rnm_sq
             Omega_tilde = sigma_Rnm_sq - np.sum(
                 np.abs(
-                    np.diagonal(R_nm[:, :, :, supercell.index((0, 0))], axis1=1, axis2=2)
+                    np.diagonal(R_nm[:, :, :, self.supercell.index((0, 0))], axis1=1, axis2=2)
                 )** 2
             )
 
@@ -1313,14 +1312,13 @@ class Wannier():
             omega_tilde_new = self._get_Omega_til(M, w_b, k_shell)
 
             if abs(grad_mag) <= grad_min and abs(omega_tilde_prev - omega_tilde_new) * (iter_num - i) <= tol:
-                print("Omega_tilde minimization has converged within tolerance. Breaking the loop")
-                print(
-                f"{i} Omega_til = {omega_tilde_new.real}, Grad mag: {grad_mag}"
-                )
+                print("Omega_tilde minimization has converged within tolerance. Breaking the loop.")
+                print(f"{i} Omega_til = {omega_tilde_new.real}, Grad mag: {grad_mag}")
                 return U
             
-            if grad_mag_prev < grad_mag and i!=0:
+            if grad_mag_prev < grad_mag:
                 print("Warning: Gradient increasing.")
+                eps *= eps*0.9
 
             if verbose:
                 print(
@@ -1366,12 +1364,11 @@ class Wannier():
     def max_loc(
         self, eps=1e-3, iter_num=1000, tol=1e-5, grad_min=1e-3, verbose=False   
     ):
-        u_tilde_wfs = self.tilde_states._u_wfs
 
         U = self.find_min_unitary(
             eps=eps, iter_num=iter_num, verbose=verbose, tol=tol, grad_min=grad_min)
-        print(U.shape, u_tilde_wfs.shape)
         
+        u_tilde_wfs = self.tilde_states._u_wfs
         u_max_loc = np.einsum('...ji, ...jm -> ...im', U, u_tilde_wfs)
         
         self.set_tilde_states(u_max_loc, cell_periodic=True)
@@ -1435,40 +1432,43 @@ class Wannier():
             )
         
         return
+    
 
-
-    def interp_energies(self, k_path, wan_idxs=None, ret_eigvecs=False):
-        u_tilde = self.get_tilde_states()["Cell periodic"]
+    def interp_energies(self, k_path, wan_idxs=None, ret_eigvecs=False, u_tilde=None):
+        if u_tilde is None:
+            u_tilde = self.get_tilde_states()["Cell periodic"]
         if wan_idxs is not None:
             u_tilde = np.take_along_axis(u_tilde, wan_idxs, axis=-2)
+
         H_k = self.get_Bloch_Ham()
         H_rot_k = u_tilde[..., :, :].conj() @ H_k @ np.transpose(u_tilde[..., : ,:], axes=(0,1,3,2))
 
         k_mesh = self.K_mesh.full_mesh
         k_idx_arr = self.K_mesh.idx_arr
-        nkx, nky = self.K_mesh.nks
         Nk = np.prod([self.K_mesh.nks])
 
-        supercell = np.array([
-            (i,j) 
-            for i in range(-int((nkx-nkx%2)/2), int((nkx-nkx%2)/2)) for j in range(-int((nky-nky%2)/2), int((nky-nky%2)/2))
-            ])
-
-        H_R = np.zeros((supercell.shape[0], H_rot_k.shape[-1], H_rot_k.shape[-1]), dtype=complex)
-        for idx, (x, y) in enumerate(supercell):
+        H_R = np.zeros((len(self.supercell), H_rot_k.shape[-1], H_rot_k.shape[-1]), dtype=complex)
+        u_R = np.zeros((len(self.supercell), u_tilde.shape[-2], u_tilde.shape[-1]), dtype=complex)
+        for idx, (x, y) in enumerate(self.supercell):
             for k_idx in k_idx_arr:
                 R_vec = np.array([x, y])
                 phase = np.exp(-1j * 2 * np.pi * np.vdot(k_mesh[k_idx], R_vec))
                 H_R[idx, :, :] += H_rot_k[k_idx] * phase / Nk
+                u_R[idx] += u_tilde[k_idx] * phase / Nk
 
         H_k_interp = np.zeros((k_path.shape[0], H_R.shape[-1], H_R.shape[-1]), dtype=complex)
+        u_k_interp = np.zeros((k_path.shape[0], u_R.shape[-2], u_R.shape[-1]), dtype=complex)
         for k_idx, k in enumerate(k_path):
-            for idx, (x, y) in enumerate(supercell):
+            for idx, (x, y) in enumerate(self.supercell):
                 R_vec = np.array([x, y])
                 phase = np.exp(1j * 2 * np.pi * np.vdot(k, R_vec))
                 H_k_interp[k_idx] += H_R[idx] * phase
+                u_k_interp[k_idx] += u_R[idx] * phase
 
         eigvals, eigvecs = np.linalg.eigh(H_k_interp)
+        eigvecs = np.einsum('...ij, ...ik->...jk', u_k_interp, eigvecs)
+        eigvecs = np.transpose(eigvecs, axes=(0, 2, 1))
+    
 
         if ret_eigvecs:
             return eigvals, eigvecs
@@ -1490,18 +1490,13 @@ class Wannier():
             print(f"w_{i} --> {center.round(5)}")
         print(rf"Omega_i = {self.omega_i}")
         print(rf"Omega_tilde = {self.omega_til}")
-        
+
         
     def get_supercell(self, Wan_idx, omit_sites=None):
         w0 = self.WFs
         center = self.centers[Wan_idx]
         orbs = self.Lattice._orbs
         lat_vecs = self.Lattice._lat_vecs
-    
-        nx, ny = w0.shape[0], w0.shape[1]
-        supercell = [(i,j) for i in range(-int((nx-nx%2)/2), int((nx-nx%2)/2)) 
-                    for j in range(-int((ny-ny%2)/2), int((ny-ny%2)/2))]
-        self.supercell = supercell
         
         # Initialize arrays to store positions and weights
         positions = {
@@ -1513,7 +1508,7 @@ class Wannier():
             'odd': {'xs': [], 'ys': [], 'r': [], 'wt': []}
         }
 
-        for tx, ty in supercell:
+        for tx, ty in self.supercell:
             for i, orb in enumerate(orbs):
                 # Extract relevant parameters
                 wf_value = w0[tx, ty, Wan_idx, i]
@@ -1781,14 +1776,8 @@ class Wannier():
     ):
         lat_vecs = self.Lattice.get_lat_vecs()
         orbs = self.Lattice.get_orb(Cartesian=False)
-        w0 = self.WFs
         centers = self.centers
 
-        nx, ny = w0.shape[0], w0.shape[1]
-
-        supercell = [(i,j) for i in range(-int((nx-nx%2)/2), int((nx-nx%2)/2)) 
-                    for j in range(-int((ny-ny%2)/2), int((ny-ny%2)/2))]
-        
         # Initialize arrays to store positions and weights
         positions = {
             'all': {'xs': [], 'ys': []},
@@ -1800,7 +1789,7 @@ class Wannier():
             'odd': {'xs': [], 'ys': []}
         }
 
-        for tx, ty in supercell:
+        for tx, ty in self.supercell:
             for i, orb in enumerate(orbs):
                 # Extract relevant parameters
                 pos = orb[0] * lat_vecs[0] + tx * lat_vecs[0] + orb[1] * lat_vecs[1] + ty * lat_vecs[1]
