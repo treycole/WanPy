@@ -5,20 +5,19 @@ from itertools import product
 from itertools import combinations_with_replacement as comb
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
+from pythtb import tb_model, wf_array
 
 
-if TYPE_CHECKING:
-    from pythtb import tb_model, wf_array
+class Model(tb_model):
+    def __init__(self, dim_k, dim_r, lat=None, orb=None, per=None, nspin=1):
+        super().__init__(dim_k, dim_r, lat=lat, orb=orb, per=per, nspin=nspin)
 
-
-class Lattice():
-    def __init__(self, model: tb_model):
-        self._orbs = model.get_orb()
-        self._n_orb = model.get_num_orbitals()
-        self._lat_vecs = model.get_lat() # lattice vectors
+        self._n_orb = super().get_num_orbitals()
+        self._lat_vecs = self.get_lat_vecs()
+        self._orb_vecs = super().get_orb()
         self._recip_lat_vecs = self.get_recip_lat_vecs()
 
-    def report(self):
+    def report_geom(self):
         """Prints information about the lattice attributes."""
         print("Lattice vectors (Cartesian coordinates)")
         for idx, lat_vec in enumerate(self._lat_vecs):
@@ -26,32 +25,359 @@ class Lattice():
         print("Reciprocal lattice vectors (1/Cartesian coordinates)")
         for idx, recip_lat_vec in enumerate(self._recip_lat_vecs):
             print(f"b_{idx} ===> {recip_lat_vec}")
-        orb_pos = self._orbs @ self._lat_vecs
+        orb_pos = self._orb_vecs @ self._lat_vecs
         print("Position of orbitals (Cartesian)")
         for idx, pos in enumerate(orb_pos):
             print(f"{idx} ===> {pos}")
         print("Position of orbitals (reduced coordinates)")
-        for idx, pos in enumerate(self._orbs):
+        for idx, pos in enumerate(self._orb_vecs):
             print(f"{idx} ===> {pos}")
+    
 
     def get_lat_vecs(self):
-        return self._lat_vecs
+        return super().get_lat()
 
+    def get_orb_vecs(self, Cartesian: bool = False):
+        """Returns orbtial vectors."""
+        orb_vecs = super().get_orb()
+        if Cartesian:
+            return orb_vecs @ self._lat_vecs
+        else:
+            return orb_vecs
+        
     def get_recip_lat_vecs(self):
-        """Returns reciprocal lattice vectors."""
         b = 2 * np.pi * np.linalg.inv(self._lat_vecs).T
         return b
     
-    def get_orb(self, Cartesian: bool = False):
-        """Returns orbtial vectors."""
-        if Cartesian:
-            return self._orbs @ self._lat_vecs
+    def get_recip_vol(self):
+        return abs(np.linalg.det(self._recip_lat_vecs))
+
+    def get_ham(self, k_pts=None):
+        """Generate Bloch Hamiltonian for an array of k-points.
+
+        K-point is given in reduced coordinates!"""
+        
+        k_arr = np.array(k_pts)
+        if k_pts is not None:
+            # if kpnt is just a number then convert it to an array
+            if len(k_arr.shape) == 0:
+                k_arr = np.array([k_arr])
+            if len(k_arr.shape) == 1:
+                n_kpts = 1
+            else:
+                n_kpts = k_arr.shape[0]
+            # check that k-vector is of corect size
+            if k_arr.shape[-1] != self._dim_k:
+                raise Exception("\n\nk-vector of wrong shape!")
         else:
-            return self._orbs
+            if self._dim_k != 0:
+                raise Exception("\n\nHave to provide a k-vector!")
+
+        if self._nspin == 1:
+            if n_kpts == 1:
+                ham = np.zeros((self._norb, self._norb), dtype=complex)
+            else:
+                ham = np.zeros((n_kpts, self._norb, self._norb), dtype=complex)
+        elif self._nspin == 2:
+            if n_kpts == 1:
+                ham = np.zeros((self._norb, 2, self._norb, 2), dtype=complex)
+            else:
+                ham = np.zeros((n_kpts, self._norb, 2, self._norb, 2), dtype=complex)
+        else:
+            raise ValueError("Invalid spin value.")
+        
+        # set diagonal elements
+        for i in range(self._norb):
+            if self._nspin == 1:
+                ham[..., i, i] = self._site_energies[i]
+            elif self._nspin == 2:
+                ham[..., i, :, i, :] = self._site_energies[i]
+
+        # Loop over all hoppings
+        for hopping in self._hoppings:
+            if self._nspin == 1:
+                amp = complex(hopping[0])
+            elif self._nspin == 2:
+                amp = np.array(hopping[0], dtype=complex)
+
+            i = hopping[1]
+            j = hopping[2]
+
+            if self._dim_k > 0:
+                ind_R = np.array(hopping[3], dtype=float)
+
+                # Compute delta_r for periodic directions
+                delta_r = ind_R - self._orb[i, :] + self._orb[j, :]  # Shape: (dim_r,)
+                delta_r_per = delta_r[self._per]  # Shape: (dim_k,)
+
+                # Compute phase factors for all k-points
+                phase = np.exp(1j * 2 * np.pi * k_arr @ delta_r_per)  # Shape: (n_kpts,)
+
+                # Compute the amplitude for all k-points and components
+                amp *= phase 
+
+            if self._nspin == 1:
+                ham[..., i, j] += amp  # Shape: (n_kpts, dim_k)
+                ham[..., j, i] += amp.conjugate()
+            elif self._nspin == 2:
+                ham[..., i, :, j, :] += amp
+                ham[..., j, :, i, :] += amp.T.conjugate()
+
+        return ham
+    
+
+    def gen_velocity(self, k_pts):
+        """
+        Generate the velocity operator for an array of k-points.
+        
+        Parameters:
+            model: Tight-binding model instance.
+            k_pts: Array of k-points in reduced coordinates, shape (n_kpts, dim_k).
+        
+        Returns:
+            vel: Velocity operators at each k-point, shape (n_kpts, dim_k, n_orb, n_orb).
+        """
+        
+        k_pts = np.array(k_pts)
+        n_kpts, dim_k = k_pts.shape
+
+        if dim_k != self._dim_k:
+            raise ValueError("k-points have incorrect dimension.")
+
+        n_orb = self._norb
+
+        if self._nspin == 1:
+            vel = np.zeros((n_kpts, dim_k, n_orb, n_orb), dtype=complex)
+        elif self._nspin == 2:
+            vel = np.zeros((n_kpts, dim_k, n_orb, 2, n_orb, 2), dtype=complex)
+        else:
+            raise ValueError("Invalid spin value.")
+
+        # Precompute the lattice vectors for periodic directions
+        lat_per = self.get_lat()[self._per, :]  # Shape: (dim_k, dim_k)
+
+        # Loop over all hoppings
+        for hopping in self._hoppings:
+            if self._nspin == 1:
+                amp = complex(hopping[0])
+            elif self._nspin == 2:
+                amp = np.array(hopping[0], dtype=complex)
+
+            i = hopping[1]
+            j = hopping[2]
+            ind_R = np.array(hopping[3], dtype=float)
+
+            # Compute delta_r for periodic directions
+            delta_r = ind_R - self._orb[i, :] + self._orb[j, :]  # Shape: (dim_r,)
+            delta_r_per = delta_r[self._per]  # Shape: (dim_k,)
+
+            # Convert delta_r to Cartesian coordinates
+            delta_r_Cart = delta_r_per @ lat_per  # Shape: (dim_k,)
+
+            # Compute phase factors for all k-points
+            phase = np.exp(1j * 2 * np.pi * k_pts @ delta_r_per)  # Shape: (n_kpts,)
+
+            # Compute the amplitude for all k-points and components
+            delta_amp = (-1j) * (-delta_r_Cart)  # Shape: (dim_k,)
+            amp_k = amp * phase[:, np.newaxis] * delta_amp[np.newaxis, :]  # Shape: (n_kpts, dim_k)
+
+            if self._nspin == 1:
+                # Update velocity operator
+                vel[..., :, i, j] += amp_k 
+                vel[..., :, j, i] += np.conj(amp_k)
+            elif self._nspin == 2:
+                # Handle spin components accordingly (requires additional implementation)
+                pass  # Implement spin handling if needed
+
+        return vel
+    
+
+    def quantum_geom_tens(self, k_pts, eigvecs=None):
+        dim_k = k_pts.shape[-1]
+        Nk = k_pts.shape[0]
+        
+        if eigvecs is None:
+            # assume we want QGT for energy eigstates
+            evals, evecs = self.solve_ham(k_pts, return_eigvecs=True)
+        n_eigs = evecs.shape[1]
+
+        v_k = self.gen_velocity(k_pts)
+        v_k_rot = np.einsum("...ni, ...aij, ...mj -> ...anm", evecs.conj(), v_k, evecs)  # (n_kpts, dim_k, n_orb, n_orb)
+        delta_E = evals[..., np.newaxis, :] - evals[..., :, np.newaxis]
+        delta_E_sq = delta_E**2
+        QGT = np.zeros((Nk, n_eigs, dim_k, dim_k), dtype=complex)
+
+        for n in range(n_eigs):
+            for m in range(n_eigs):
+                if n != m:
+                    for mu in range(dim_k):
+                        v_nm_mu = v_k_rot[:, mu, n, m]
+                        for nu in range(dim_k):
+                            v_mn_nu = v_k_rot[:, nu, m, n]
+                            QGT[:, n, mu, nu] += (v_nm_mu * v_mn_nu) / delta_E_sq[:, n, m]
+
+        return QGT
+    
+    def Chern_num(self, Omega=None):
+
+        if Omega is None:
+            nkx, nky = 50, 50
+            k_mesh = K_mesh(self, nkx, nky)
+            full_mesh = k_mesh.gen_k_mesh(endpoint=False)
+            evals, evecs = self.solve_ham(full_mesh, return_eigvecs=True)
+
+            QGT = self.quantum_geom_tens(full_mesh)
+            Omega = -2 * QGT.imag 
+
+        Nk = Omega.shape[0] 
+        V_BZ = self.get_recip_vol()
+        dk_sq = V_BZ / np.prod(Nk)
+        Chern = np.sum(Omega[..., 0, 1], axis=0) * dk_sq / (2 * np.pi)
+
+        return Chern
+    
+    def solve_ham(self, k_arr, return_eigvecs=False):
+        H_k = self.get_ham(k_arr)
+        eigvals, eigvecs = np.linalg.eigh(H_k)
+        eigvecs = np.transpose(eigvecs, axes=(0, 2, 1))  # [k, n, orb]
+        # eigvals = np.transpose(eigvals, axes=(1, 0))  # [k, n]
+
+        if return_eigvecs:
+            return eigvals, eigvecs
+        else:
+            return eigvals
+        
+    
+    def make_supercell(
+            self, sc_red_lat, return_sc_vectors=False, to_home=True, to_home_suppress_warning=False
+            ):
+        
+        # Can't make super cell for model without periodic directions
+        if self._dim_r==0:
+            raise Exception("\n\nMust have at least one periodic direction to make a super-cell")
+        
+        # convert array to numpy array
+        use_sc_red_lat=np.array(sc_red_lat)
+        
+        # checks on super-lattice array
+        if use_sc_red_lat.shape != (self._dim_r, self._dim_r):
+            raise Exception("\n\nDimension of sc_red_lat array must be dim_r*dim_r")
+        if use_sc_red_lat.dtype!=int:
+            raise Exception("\n\nsc_red_lat array elements must be integers")
+        for i in range(self._dim_r):
+            for j in range(self._dim_r):
+                if (i==j) and (i not in self._per) and use_sc_red_lat[i,j] != 1:
+                    raise Exception("\n\nDiagonal elements of sc_red_lat for non-periodic directions must equal 1.")
+                if (i!=j) and ((i not in self._per) or (j not in self._per)) and use_sc_red_lat[i,j]!=0:
+                    raise Exception("\n\nOff-diagonal elements of sc_red_lat for non-periodic directions must equal 0.")
+        if np.abs(np.linalg.det(use_sc_red_lat))<1.0E-6:
+            raise Exception("\n\nSuper-cell lattice vectors length/area/volume too close to zero, or zero.")
+        if np.linalg.det(use_sc_red_lat)<0.0:
+            raise Exception("\n\nSuper-cell lattice vectors need to form right handed system.")
+
+        # converts reduced vector in original lattice to reduced vector in super-cell lattice
+        def to_red_sc(red_vec_orig):
+            return np.linalg.solve(np.array(use_sc_red_lat.T,dtype=float),
+                                   np.array(red_vec_orig,dtype=float))
+
+        # conservative estimate on range of search for super-cell vectors
+        max_R = np.max(np.abs(use_sc_red_lat))*self._dim_r
+
+        # candidates for super-cell vectors
+        # CHANGED
+        sc_cands = [
+            np.array(tup) 
+            for tup in product(*[range(-max_R, max_R + 1) for i in range(self._dim_r)])
+            ]
+        if self._dim_r < 1 or self._dim_r > 4:
+            raise Exception("\n\nWrong dimensionality of dim_r!")
+
+        # find all vectors inside super-cell
+        # store them here
+        sc_vec = []
+        eps_shift = np.sqrt(2.0)*1.0E-8 # shift of the grid, so to avoid double counting
+        for vec in sc_cands:
+            # compute reduced coordinates of this candidate vector in the super-cell frame
+            tmp_red=to_red_sc(vec).tolist()
+            # check if in the interior
+            inside=True
+            for t in tmp_red:
+                if t<=-1.0*eps_shift or t>1.0-eps_shift:
+                    inside=False                
+            if inside:
+                sc_vec.append(np.array(vec))
+        # number of times unit cell is repeated in the super-cell
+        num_sc=len(sc_vec)
+
+        # check that found enough super-cell vectors
+        if int(round(np.abs(np.linalg.det(use_sc_red_lat))))!=num_sc:
+            raise Exception("\n\nSuper-cell generation failed! Wrong number of super-cell vectors found.")
+
+        # cartesian vectors of the super lattice
+        sc_cart_lat=np.dot(use_sc_red_lat,self._lat)
+
+        # orbitals of the super-cell tight-binding model
+        # CHANGED
+        sc_orb = [ to_red_sc(orb+cur_sc_vec) 
+            for cur_sc_vec in sc_vec for orb in self._orb
+            ]
+        
+        # create super-cell tb_model object to be returned
+        # CHANGED
+        sc_tb = Model(self._dim_k,self._dim_r,sc_cart_lat,sc_orb,per=self._per,nspin=self._nspin)
+
+        # remember if came from w90
+        sc_tb._assume_position_operator_diagonal=self._assume_position_operator_diagonal
+
+        # repeat onsite energies
+        for i in range(num_sc):
+            for j in range(self._norb):
+                sc_tb.set_onsite(self._site_energies[j],i*self._norb+j)
+
+        # set hopping terms
+        for c,cur_sc_vec in enumerate(sc_vec): # go over all super-cell vectors
+            for h in range(len(self._hoppings)): # go over all hopping terms of the original model
+                # amplitude of the hop is the same
+                amp=self._hoppings[h][0]
+
+                # lattice vector of the hopping
+                ind_R=copy.deepcopy(self._hoppings[h][3])
+                # super-cell component of hopping lattice vector
+                # shift also by current super cell vector
+                sc_part=np.floor(to_red_sc(ind_R+cur_sc_vec)) # round down!
+                sc_part=np.array(sc_part,dtype=int)
+                # find remaining vector in the original reduced coordinates
+                orig_part=ind_R+cur_sc_vec-np.dot(sc_part,use_sc_red_lat)
+                # remaining vector must equal one of the super-cell vectors
+                pair_ind=None
+                for p,pair_sc_vec in enumerate(sc_vec):
+                    if False not in (pair_sc_vec==orig_part):
+                        if pair_ind is not None:
+                            raise Exception("\n\nFound duplicate super cell vector!")
+                        pair_ind=p
+                if pair_ind is None:
+                    raise Exception("\n\nDid not find super cell vector!")
+                        
+                # index of "from" and "to" hopping indices
+                hi=self._hoppings[h][1] + c*self._norb
+                hj=self._hoppings[h][2] + pair_ind*self._norb
+                
+                # add hopping term
+                sc_tb.set_hop(amp,hi,hj,sc_part,mode="add",allow_conjugate_pair=True)
+
+        # put orbitals to home cell if asked for
+        if to_home:
+            sc_tb._shift_to_home(to_home_suppress_warning)
+
+        # return new tb model and vectors if needed
+        if not return_sc_vectors:
+            return sc_tb
+        else:
+            return (sc_tb,sc_vec)
 
 
 class K_mesh():
-    def __init__(self, model: tb_model, *nks):
+    def __init__(self, model: Model, *nks):
         """Class for storing and manipulating a regular mesh of k-points. 
 
         Attributes:
@@ -78,7 +404,7 @@ class K_mesh():
             num_nnbrs (int):
                 number of nearest neighbor k-points.
         """
-        self.Lattice: Lattice = Lattice(model)
+        self.model = model
         self.nks = nks
         self.dim: int = len(nks)
         self.idx_arr: list = list(product(*[range(nk) for nk in nks]))  # 1D list of all k_indices (integers)
@@ -147,7 +473,7 @@ class K_mesh():
                 to a given k-mesh point.
         """
         # basis vectors connecting neighboring mesh points (in inverse Cartesian units)
-        dk = np.array([self.Lattice._recip_lat_vecs[i] / nk for i, nk in enumerate(self.nks)])
+        dk = np.array([self.model._recip_lat_vecs[i] / nk for i, nk in enumerate(self.nks)])
         # array of integers e.g. in 2D for N_sh = 1 would be [0,1], [1,0], [0,-1], [-1,0]
         nnbr_idx = list(product(list(range(-N_sh, N_sh + 1)), repeat=len(self.nks)))
         nnbr_idx.remove((0, 0))
@@ -229,18 +555,17 @@ class K_mesh():
 
         """
         idx_shell = self.nnbr_idx_shell
-        bc_phase = np.ones((*self.nks, idx_shell[0].shape[0], self.Lattice._orbs.shape[0]), dtype=complex)
-        for k_idx in self.idx_arr:
-            for shell_idx, idx_vec in enumerate(idx_shell[0]):  # nearest neighbors
-                k_nbr_idx = np.array(k_idx) + idx_vec
-                # apply pbc to index
-                mod_idx = np.mod(k_nbr_idx, self.nks)
-                diff = k_nbr_idx - mod_idx
-                G = np.divide(np.array(diff), np.array(self.nks))
+        bc_phase = np.ones((*self.nks, idx_shell[0].shape[0], self.model._orb_vecs.shape[0]), dtype=complex)
+        for k_idx in self.idx_arr: # each index in k-mesh
+            for shell_idx, idx_vec in enumerate(idx_shell[0]):  # vecs connecting neighboring indices
+                k_nbr_idx = np.array(k_idx) + idx_vec # indices for neighboring k
+                mod_idx = np.mod(k_nbr_idx, self.nks) # apply pbc to index
+                diff = k_nbr_idx - mod_idx # if mod changed nbr, will be non-zero
+                G = np.divide(np.array(diff), np.array(self.nks)) # will be pm 1 where crossed, 0 else
                 # if the translated k-index contains -1 or nk_i+1 then we crossed the BZ boundary
                 cross_bndry = np.any((k_nbr_idx == -1) | np.logical_or.reduce([k_nbr_idx == nk for nk in self.nks]))
                 if cross_bndry:
-                    bc_phase[k_idx][shell_idx]= np.exp(-1j * 2 * np.pi * self.Lattice._orbs @ G.T).T
+                    bc_phase[k_idx][shell_idx]= np.exp(-1j * 2 * np.pi * self.model._orb_vecs @ G.T).T
 
         return bc_phase
     
@@ -255,7 +580,7 @@ class K_mesh():
         lam = -1 if inverse else 1  # overall minus if getting cell periodic from Bloch
         per_dir = list(range(self.flat_mesh.shape[-1]))  # list of periodic dimensions
         # slice second dimension to only keep only periodic dimensions in orb
-        per_orb = self.Lattice._orbs[:, per_dir]
+        per_orb = self.model._orb_vecs[:, per_dir]
 
         # compute a list of phase factors [k_val, orbital]
         wf_phases = np.exp(lam * 1j * 2 * np.pi * per_orb @ self.flat_mesh.T, dtype=complex).T
@@ -283,30 +608,35 @@ class K_mesh():
 
 
 class Bloch():
-    def __init__(self, model: tb_model, *nks):
+    def __init__(self, model: Model, *nks):
         """Class for storing and manipulating Bloch like wavefunctions.
         
         Wavefunctions are defined on a semi-full reciprocal space mesh.
         """
-        self.model: tb_model = model
-        self.Lattice: Lattice = Lattice(model)
+        self.model: Model = model
         self.K_mesh: K_mesh = K_mesh(model, *nks)
         self.set_Bloch_ham()
+
+    
+    def solve_on_path(self, k_arr):
+        eigvals, eigvecs = self.model.solve_ham(k_arr, return_eigvecs=True)
+        eigvecs = eigvecs.reshape(*[nk for nk in self.K_mesh.nks], *eigvecs.shape[1:])
+        eigvals = eigvals.reshape(*[nk for nk in self.K_mesh.nks], *eigvals.shape[1:])
+        self.set_wfs(eigvecs)
+        self.energies = eigvals
+
 
     def solve_model(self):
         """
         Solves for the eigenstates of the Bloch Hamiltonian defined by the model over a semi-full 
         k-mesh, e.g. in 3D reduced coordinates {k = [kx, ky, kz] | k_i in [0, 1)}.
         """
-        u_wfs = wf_array(self.model, [*self.K_mesh.nks])
-        energies = np.empty([*self.K_mesh.nks, self.Lattice._n_orb])
-        for k_idx in self.K_mesh.idx_arr:
-            #TODO: can condense to single line with eig_vectors=True
-            energies[k_idx] = self.model.solve_one(self.K_mesh.full_mesh[k_idx], eig_vectors=False)
-            u_wfs.solve_on_one_point(self.K_mesh.full_mesh[k_idx], [*k_idx])
-        u_wfs = np.array(u_wfs._wfs, dtype=complex)
-        self.set_wfs(u_wfs)
-        self.energies = energies
+
+        eigvals, eigvecs = self.model.solve_ham(self.K_mesh.flat_mesh, return_eigvecs=True)
+        eigvecs = eigvecs.reshape(*[nk for nk in self.K_mesh.nks], *eigvecs.shape[1:])
+        eigvals = eigvals.reshape(*[nk for nk in self.K_mesh.nks], *eigvals.shape[1:])
+        self.set_wfs(eigvecs)
+        self.energies = eigvals
 
     def get_states(self):
         """Returns dictionary containing Bloch and cell-periodic eigenstates."""
@@ -344,13 +674,8 @@ class Bloch():
         return self._M
     
     def set_Bloch_ham(self):
-        H_k = np.zeros((*self.K_mesh.nks, self.Lattice._n_orb, self.Lattice._n_orb), dtype=complex)
-
-        for k_idx in self.K_mesh.idx_arr:
-            k_pt = self.K_mesh.full_mesh[k_idx]
-            H_k[k_idx] = self.model._gen_ham(k_pt)
-
-        self.H_k = H_k
+        H_k = self.model.get_ham(k_pts=self.K_mesh.flat_mesh)
+        self.H_k = H_k.reshape(*[nk for nk in self.K_mesh.nks], *H_k.shape[1:])
 
     def set_wfs(self, wfs, cell_periodic: bool=True):
         """
@@ -371,17 +696,15 @@ class Bloch():
 
         self._n_states = self._u_wfs.shape[-2]
         self._M = self.self_overlap_mat()
-
-        nks = self.K_mesh.nks
-        n_orb = self.Lattice._n_orb
-        num_nnbrs = self.K_mesh.num_nnbrs
-        nnbr_idx_shell = self.K_mesh.nnbr_idx_shell
- 
-        # band projector
+        # band projectors
         self._P = np.einsum("...ni, ...nj -> ...ij", self._u_wfs, self._u_wfs.conj())
         self._Q = np.eye(self._P.shape[-1]) - self._P[..., :, :]
 
-        # Projectors of initial tilde subspace at points neighboring each k-point
+        nks = self.K_mesh.nks
+        n_orb = self.model._n_orb
+        num_nnbrs = self.K_mesh.num_nnbrs
+        nnbr_idx_shell = self.K_mesh.nnbr_idx_shell
+
         self._P_nbr = np.zeros((*nks, num_nnbrs, n_orb, n_orb), dtype=complex)
         self._Q_nbr = np.zeros((*nks, num_nnbrs, n_orb, n_orb), dtype=complex)
         for idx, idx_vec in enumerate(nnbr_idx_shell[0]):  # nearest neighbors
@@ -405,7 +728,7 @@ class Bloch():
             wfs with orbitals multiplied by phase factor
 
         """
-        phases = self.K_mesh.get_orb_phases(inverse=inverse).reshape(*self.K_mesh.nks, self.Lattice._n_orb)
+        phases = self.K_mesh.get_orb_phases(inverse=inverse).reshape(*self.K_mesh.nks, self.model._n_orb)
     
         # Broadcasting the phases to match dimensions
         wfsxphase = wfs * phases[..., np.newaxis, :] 
@@ -413,13 +736,18 @@ class Bloch():
     
     
     def self_overlap_mat(self):
-        """
-        Compute the overlap matrix of the cell periodic eigenstates. Assumes that the last u_wf
-        along each periodic direction corresponds to the next to last k-point in the
-        mesh (excludes endpoints). 
+        """Compute the overlap matrix of the cell periodic eigenstates. 
+        
+        Overlap matrix of the form
+        
+        M_{m,n}^{k, k+b} = < u_{m, k} | u_{n, k+b} >
+
+        Assumes that the last u_wf along each periodic direction corresponds to the
+        next to last k-point in the mesh (excludes endpoints). 
 
         Returns:
-            M (np.array): overlap matrix
+            M (np.array): 
+                Overlap matrix with shape [*nks, num_nnbrs, n_states, n_states]
         """
 
         # Assumes only one shell for now
@@ -454,6 +782,16 @@ class Bloch():
         A = np.einsum("...ij, kj -> ...ik", psi_wfs.conj(), tfs)
         return A
     
+
+    def Chern_num(self):
+        V_BZ = self.model.get_recip_vol()
+        dk_sq = V_BZ / np.prod(self.K_mesh.nks)
+
+        QGT = self.model.quantum_geom_tens(self.K_mesh.flat_mesh)
+        Omega = -2 * QGT.imag[..., 0, 1] 
+        Chern = np.sum(Omega, axis=0) * dk_sq / (2 * np.pi)
+        return Chern
+    
     
     def plot_bands(
         self, k_path, 
@@ -481,9 +819,9 @@ class Bloch():
         # generate k-path and labels
         (k_vec, k_dist, k_node) = self.model.k_path(k_path, nk, report=False)
         # diagonalize model on path
-        evals, evecs = self.model.solve_all(k_vec, eig_vectors=True)
-        evecs = np.transpose(evecs, axes=(1, 0, 2)) # [k, n, orb]
-        evals = np.transpose(evals, axes=(1, 0)) # [k, n]
+        evals, evecs = self.model.solve_ham(k_vec, return_eigvecs=True)
+        # evecs = np.transpose(evecs, axes=(1, 0, 2)) # [k, n, orb]
+        # evals = np.transpose(evals, axes=(1, 0)) # [k, n]
         n_eigs = evecs.shape[1]
 
         # scattered bands with sublattice color
@@ -524,12 +862,10 @@ class Bloch():
 
 class Wannier():
     def __init__(
-            self, model: tb_model, nks: list  
+            self, model: Model, nks: list  
             ):
-        self._model: tb_model = model
+        self.model: Model = model
         self._nks: list = nks
-
-        self.Lattice: Lattice = Lattice(model)
         self.K_mesh: K_mesh = K_mesh(model, *nks)
 
         self.energy_eigstates: Bloch = Bloch(model, *nks)
@@ -548,7 +884,7 @@ class Wannier():
         if Cartesian:
             return self.centers
         else:
-            return self.centers @ np.linalg.inv(self.Lattice._lat_vecs)
+            return self.centers @ np.linalg.inv(self.model._lat_vecs)
            
     def get_trial_wfs(self, tf_list):
         """
@@ -573,14 +909,14 @@ class Wannier():
                 return np.array(orthogonal_vectors)
 
             # Generate n_tfs random n_orb-dimensional vectors
-            vectors = abs(np.random.randn(n_tfs, self.Lattice._n_orb))
+            vectors = abs(np.random.randn(n_tfs, self.model._n_orb))
             # Apply Gram-Schmidt to orthonormalize them
             orthonorm_vecs = gram_schmidt(vectors)
 
             tf_list = []
             for n in range(n_tfs):
                 tf = []
-                for orb in range(self.Lattice._n_orb):
+                for orb in range(self.model._n_orb):
                     tf.append((orb, orthonorm_vecs[n, orb]))
                 tf_list.append(tf)
 
@@ -588,7 +924,7 @@ class Wannier():
         num_tf = len(tf_list)
 
         # initialize array containing tfs = "trial functions"
-        tfs = np.zeros([num_tf, self.Lattice._n_orb], dtype=complex)
+        tfs = np.zeros([num_tf, self.model._n_orb], dtype=complex)
         for j, tf in enumerate(tf_list):
             if isinstance(tf, (int, np.int64)):
                 # trial function only has weight on one site
@@ -722,8 +1058,8 @@ class Wannier():
 
         for n in range(n_wfs):  # Wannier index
             for tx, ty in self.supercell:  # cells in supercell
-                for i, orb in enumerate(self.Lattice._orbs):  # values of Wannier function on lattice
-                    pos = (orb[0] + tx) * self.Lattice._lat_vecs[0] + (orb[1] + ty) * self.Lattice._lat_vecs[1]  # position
+                for i, orb in enumerate(self.model._orb_vecs):  # values of Wannier function on lattice
+                    pos = (orb[0] + tx) * self.model._lat_vecs[0] + (orb[1] + ty) * self.model._lat_vecs[1]  # position
                     r = np.sqrt(pos[0] ** 2 + pos[1] ** 2)
 
                     w0n_r = w0[tx, ty, n, i]  # Wannier function
@@ -868,7 +1204,7 @@ class Wannier():
         # useful constants
         nks = self._nks 
         Nk = np.prod(nks)
-        n_orb = self.Lattice._n_orb
+        n_orb = self.model._n_orb
         n_occ = int(n_orb/2)
 
         # eigenenergies and eigenstates for inner/outer window
@@ -1120,7 +1456,7 @@ class Wannier():
         """
         nks = self._nks 
         Nk = np.prod(nks)
-        n_orb = self.Lattice._n_orb
+        n_orb = self.model._n_orb
         n_occ = int(n_orb/2)
 
         # Assumes only one shell for now
@@ -1495,8 +1831,8 @@ class Wannier():
     def get_supercell(self, Wan_idx, omit_sites=None):
         w0 = self.WFs
         center = self.centers[Wan_idx]
-        orbs = self.Lattice._orbs
-        lat_vecs = self.Lattice._lat_vecs
+        orbs = self.model._orb_vecs
+        lat_vecs = self.model._lat_vecs
         
         # Initialize arrays to store positions and weights
         positions = {
@@ -1774,8 +2110,8 @@ class Wannier():
         kwargs_omit={'s': 50, 'marker': 'x', 'c':'k'},
         kwargs_lat={'s':10, 'marker': 'o', 'c':'k'}, fig=None, ax=None
     ):
-        lat_vecs = self.Lattice.get_lat_vecs()
-        orbs = self.Lattice.get_orb(Cartesian=False)
+        lat_vecs = self.model.get_lat_vecs()
+        orbs = self.model.get_orb(Cartesian=False)
         centers = self.centers
 
         # Initialize arrays to store positions and weights

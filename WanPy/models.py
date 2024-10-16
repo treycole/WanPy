@@ -1,5 +1,8 @@
 from pythtb import *
 from numpy import sqrt
+# import sys
+# sys.path.append("../WanPy")
+from pythTB_wan import Model
 
 # used for testing purposes
 
@@ -10,7 +13,7 @@ def chessboard(t0, tprime, delta):
     orb=[[0.0, 0.0], [0.5, 0.5]]
 
     # make two dimensional tight-binding checkerboard model
-    model = tb_model(2, 2, lat=lat, orb=orb)
+    model = Model(2, 2, lat=lat, orb=orb)
 
     # set on-site energies
     model.set_onsite([-delta, delta], mode='set')
@@ -30,10 +33,10 @@ def chessboard(t0, tprime, delta):
     return model
 
 def Haldane(delta, t, t2):
-    lat=[[1, 0],[0.5, sqrt(3)/2]]
-    orb=[[1/3, 1/3],[2/3, 2/3]]
+    lat = [[1, 0], [0.5, sqrt(3)/2]]
+    orb = [[1/3, 1/3], [2/3, 2/3]]
 
-    model = tb_model(2, 2, lat, orb)
+    model = Model(2, 2, lat, orb)
 
     model.set_onsite([-delta, delta], mode='reset')
 
