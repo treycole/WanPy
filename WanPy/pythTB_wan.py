@@ -14,7 +14,7 @@ class Model(tb_model):
 
         self._n_orb = super().get_num_orbitals()
         self._lat_vecs = self.get_lat_vecs()
-        self._orb_vecs = super().get_orb()
+        self._orb_vecs = self.get_orb_vecs(Cartesian=False)
         self._recip_lat_vecs = self.get_recip_lat_vecs()
 
     def report_geom(self):
@@ -114,10 +114,10 @@ class Model(tb_model):
                 phase = np.exp(1j * 2 * np.pi * k_arr @ delta_r_per)  # Shape: (n_kpts,)
 
                 # Compute the amplitude for all k-points and components
-                amp *= phase 
+                amp *= phase  # Shape: (n_kpts,)
 
             if self._nspin == 1:
-                ham[..., i, j] += amp  # Shape: (n_kpts, dim_k)
+                ham[..., i, j] += amp 
                 ham[..., j, i] += amp.conjugate()
             elif self._nspin == 2:
                 ham[..., i, :, j, :] += amp
@@ -186,13 +186,13 @@ class Model(tb_model):
                 vel[..., :, i, j] += amp_k 
                 vel[..., :, j, i] += np.conj(amp_k)
             elif self._nspin == 2:
-                # Handle spin components accordingly (requires additional implementation)
-                pass  # Implement spin handling if needed
+                vel[..., :, i, :, j, :] += amp
+                vel[..., :, j, :, i, :] += amp.T.conjugate()
 
         return vel
     
 
-    def quantum_geom_tens(self, k_pts, eigvecs=None):
+    def quantum_geom_tens(self, k_pts, occ_idxs=None, eigvecs=None):
         dim_k = k_pts.shape[-1]
         Nk = k_pts.shape[0]
         
@@ -200,6 +200,9 @@ class Model(tb_model):
             # assume we want QGT for energy eigstates
             evals, evecs = self.solve_ham(k_pts, return_eigvecs=True)
         n_eigs = evecs.shape[1]
+
+        if occ_idxs is None:
+            occ_idxs = list(range(int(n_eigs/2)))
 
         v_k = self.gen_velocity(k_pts)
         v_k_rot = np.einsum("...ni, ...aij, ...mj -> ...anm", evecs.conj(), v_k, evecs)  # (n_kpts, dim_k, n_orb, n_orb)
@@ -209,7 +212,8 @@ class Model(tb_model):
 
         for n in range(n_eigs):
             for m in range(n_eigs):
-                if n != m:
+                # if n != m:
+                if (n in occ_idxs) ^ (m in occ_idxs):
                     for mu in range(dim_k):
                         v_nm_mu = v_k_rot[:, mu, n, m]
                         for nu in range(dim_k):
@@ -218,20 +222,20 @@ class Model(tb_model):
 
         return QGT
     
+    
     def Chern_num(self, Omega=None):
 
         if Omega is None:
             nkx, nky = 50, 50
             k_mesh = K_mesh(self, nkx, nky)
             full_mesh = k_mesh.gen_k_mesh(endpoint=False)
-            evals, evecs = self.solve_ham(full_mesh, return_eigvecs=True)
 
             QGT = self.quantum_geom_tens(full_mesh)
             Omega = -2 * QGT.imag 
 
         Nk = Omega.shape[0] 
         V_BZ = self.get_recip_vol()
-        dk_sq = V_BZ / np.prod(Nk)
+        dk_sq = V_BZ / Nk
         Chern = np.sum(Omega[..., 0, 1], axis=0) * dk_sq / (2 * np.pi)
 
         return Chern
@@ -240,7 +244,6 @@ class Model(tb_model):
         H_k = self.get_ham(k_arr)
         eigvals, eigvecs = np.linalg.eigh(H_k)
         eigvecs = np.transpose(eigvecs, axes=(0, 2, 1))  # [k, n, orb]
-        # eigvals = np.transpose(eigvals, axes=(1, 0))  # [k, n]
 
         if return_eigvecs:
             return eigvals, eigvecs
@@ -374,6 +377,67 @@ class Model(tb_model):
             return sc_tb
         else:
             return (sc_tb,sc_vec)
+        
+        
+    def plot_bands(
+        self, k_path, nk=101, k_label=None, red_lat_idx=None, 
+        fig=None, ax=None, title=None, scat_size=3, lw=3, lc='b', cmap="bwr", show=False, cbar=True
+        ):
+        """
+
+        Args:
+            k_path (list): List of high symmetry points to plot bands through
+            k_label (list[str], optional): Labels of high symmetry points. Defaults to None.
+            title (str, optional): _description_. Defaults to None.
+            save_name (str, optional): _description_. Defaults to None.
+            red_lat_idx (list, optional): _description_. Defaults to None.
+            show (bool, optional): _description_. Defaults to False.
+
+        Returns:
+            fig, ax: matplotlib fig and ax
+        """
+        
+        if fig is None:
+            fig, ax = plt.subplots()
+
+        # generate k-path and labels
+        (k_vec, k_dist, k_node) = self.k_path(k_path, nk, report=False)
+        # diagonalize model on path
+        evals, evecs = self.solve_ham(k_vec, return_eigvecs=True)
+        n_eigs = evecs.shape[-2]
+
+        # scattered bands with sublattice color
+        if red_lat_idx is not None:
+            wt = abs(evecs)**2
+            col = np.sum([  wt[..., i] for i in red_lat_idx ], axis=0)
+
+            for n in range(n_eigs):
+                scat = ax.scatter(k_dist, evals[:, n], c=col[:, n], cmap=cmap, marker='o', s=scat_size, vmin=0, vmax=1, zorder=2)
+
+            if cbar:
+                cbar = fig.colorbar(scat, ticks=[1,0])
+                cbar.ax.set_yticklabels([r'$\psi_2$', r'$\psi_1$'], size=12)
+
+        else:
+            # continuous bands
+            for n in range(n_eigs):
+                ax.plot(k_dist, evals[:, n], c=lc, lw=lw)
+
+        ax.set_xlim(0, k_node[-1])
+        ax.set_xticks(k_node)
+        for n in range(len(k_node)):
+            ax.axvline(x=k_node[n], linewidth=0.5, color='k', zorder=1)
+        if k_label is not None:
+            ax.set_xticklabels(k_label, size=12)
+        
+        ax.set_title(title)
+        ax.set_ylabel(r"Energy $E(\mathbf{{k}})$", size=12)
+        ax.yaxis.labelpad = 10
+
+        if show:
+            plt.show()
+
+        return fig, ax
 
 
 class K_mesh():
@@ -1167,9 +1231,14 @@ class Wannier():
         return Omega_i
     
     
-    def get_Omega_I(self):
-        P = self.tilde_states.get_projector()
-        P_nbr, Q_nbr = self.tilde_states.get_nbr_projector(return_Q=True)
+    def get_Omega_I(self, tilde=True):
+        if tilde:
+            P = self.tilde_states.get_projector()
+            _, Q_nbr = self.tilde_states.get_nbr_projector(return_Q=True)
+        else:
+            P = self.energy_eigstates.get_projector()
+            _, Q_nbr = self.energy_eigstates.get_nbr_projector(return_Q=True)
+
         nks = self.K_mesh.nks
         Nk = np.prod(nks)
         num_nnbrs = self.K_mesh.num_nnbrs
@@ -1180,6 +1249,25 @@ class Wannier():
             T_kb[..., idx] = np.trace(P[..., :, :] @ Q_nbr[..., idx, :, :], axis1=-1, axis2=-2)
 
         return (1 / Nk) * w_b[0] * np.sum(T_kb)
+    
+    def get_Omega_I_k(self, tilde=True):
+        if tilde:
+            P = self.tilde_states.get_projector()
+            _, Q_nbr = self.tilde_states.get_nbr_projector(return_Q=True)
+        else:
+            P = self.energy_eigstates.get_projector()
+            _, Q_nbr = self.energy_eigstates.get_nbr_projector(return_Q=True)
+    
+        nks = self.K_mesh.nks
+        Nk = np.prod(nks)
+        num_nnbrs = self.K_mesh.num_nnbrs
+        w_b, _, idx_shell = self.K_mesh.get_weights(N_sh=1)
+
+        T_kb = np.zeros((*nks, num_nnbrs), dtype=complex)
+        for idx, idx_vec in enumerate(idx_shell[0]):  # nearest neighbors
+            T_kb[..., idx] = np.trace(P[..., :, :] @ Q_nbr[..., idx, :, :], axis1=-1, axis2=-2)
+
+        return (1 / Nk) * w_b[0] * np.sum(T_kb, axis=-1)
     
     def get_omega_I_k(self):
         P = self.tilde_states.get_projector()
@@ -1195,7 +1283,7 @@ class Wannier():
 
         return (1 / Nk) * w_b[0] * np.sum(T_kb, axis=-1)
     
-     ####### Maximally Localized WF ############
+     ####### Maximally Localized WF #######
 
     def find_optimal_subspace(
         self, N_wfs=None, inner_window=None, outer_window="occupied", 
@@ -1556,6 +1644,9 @@ class Wannier():
 
             if verbose and omega_I_new > omega_I_prev:
                 print("Warning: Omega_I is increasing.")
+                alpha -= 0.1
+                if alpha < 0:
+                    alpha = 0
             
             if abs(omega_I_prev - omega_I_new) * (iter_num - i) <= tol:
                 # assuming the change in omega_i monatonically decreases, omega_i will not change
@@ -1606,10 +1697,7 @@ class Wannier():
 
         Returns:
             U: The unitary matrix
-            M: The rotated overlap matrix
-        
         """
-        u_wfs = self.tilde_states._u_wfs
         M = self.tilde_states._M
         w_b, k_shell, idx_shell = self.K_mesh.get_weights()
         # Assumes only one shell for now
@@ -1654,7 +1742,7 @@ class Wannier():
             
             if grad_mag_prev < grad_mag:
                 print("Warning: Gradient increasing.")
-                eps *= eps*0.9
+                eps *= 0.9
 
             if verbose:
                 print(
@@ -1685,7 +1773,7 @@ class Wannier():
             assert hasattr(self.tilde_states, "_u_wfs"), "Need pass trial wavefunction list or initalize tilde states with single_shot()."
         
         # Minimizing Omega_I via disentanglement
-        util_min_Wan = self.find_optimal_subspace(
+        util_min = self.find_optimal_subspace(
             N_wfs=N_wfs,
             outer_window=outer_window,
             inner_window=inner_window,
@@ -1693,7 +1781,7 @@ class Wannier():
             verbose=verbose, alpha=alpha, tol=tol
         )
 
-        self.set_tilde_states(util_min_Wan, cell_periodic=True)
+        self.set_tilde_states(util_min, cell_periodic=True)
 
         return
     
@@ -1705,9 +1793,9 @@ class Wannier():
             eps=eps, iter_num=iter_num, verbose=verbose, tol=tol, grad_min=grad_min)
         
         u_tilde_wfs = self.tilde_states._u_wfs
-        u_max_loc = np.einsum('...ji, ...jm -> ...im', U, u_tilde_wfs)
+        util_max_loc = np.einsum('...ji, ...jm -> ...im', U, u_tilde_wfs)
         
-        self.set_tilde_states(u_max_loc, cell_periodic=True)
+        self.set_tilde_states(util_max_loc, cell_periodic=True)
         
         return
 
@@ -1783,33 +1871,64 @@ class Wannier():
         k_idx_arr = self.K_mesh.idx_arr
         Nk = np.prod([self.K_mesh.nks])
 
-        H_R = np.zeros((len(self.supercell), H_rot_k.shape[-1], H_rot_k.shape[-1]), dtype=complex)
-        u_R = np.zeros((len(self.supercell), u_tilde.shape[-2], u_tilde.shape[-1]), dtype=complex)
-        for idx, (x, y) in enumerate(self.supercell):
+        nks = self.K_mesh.nks
+        supercell = list(product(*[range(-int((nk-nk%2)/2), int((nk-nk%2)/2)) for nk in nks]))
+        # supercell = list(product(*[range(-int((nk-nk%2)/2), int((nk-nk%2)/2)+1) for nk in nks]))
+
+        # Fourier transform to real space
+        H_R = np.zeros((len(supercell), H_rot_k.shape[-1], H_rot_k.shape[-1]), dtype=complex)
+        u_R = np.zeros((len(supercell), u_tilde.shape[-2], u_tilde.shape[-1]), dtype=complex)
+        for idx, (x, y) in enumerate(supercell):
             for k_idx in k_idx_arr:
                 R_vec = np.array([x, y])
                 phase = np.exp(-1j * 2 * np.pi * np.vdot(k_mesh[k_idx], R_vec))
                 H_R[idx, :, :] += H_rot_k[k_idx] * phase / Nk
                 u_R[idx] += u_tilde[k_idx] * phase / Nk
 
+        # interpolate to arbitrary k
         H_k_interp = np.zeros((k_path.shape[0], H_R.shape[-1], H_R.shape[-1]), dtype=complex)
         u_k_interp = np.zeros((k_path.shape[0], u_R.shape[-2], u_R.shape[-1]), dtype=complex)
         for k_idx, k in enumerate(k_path):
-            for idx, (x, y) in enumerate(self.supercell):
+            for idx, (x, y) in enumerate(supercell):
                 R_vec = np.array([x, y])
                 phase = np.exp(1j * 2 * np.pi * np.vdot(k, R_vec))
                 H_k_interp[k_idx] += H_R[idx] * phase
                 u_k_interp[k_idx] += u_R[idx] * phase
 
+        print("Hermiticity Check: ", np.allclose(H_k_interp, np.conjugate(np.transpose(H_k_interp, axes=(0, 2, 1))), atol=1e-10))
+
         eigvals, eigvecs = np.linalg.eigh(H_k_interp)
         eigvecs = np.einsum('...ij, ...ik->...jk', u_k_interp, eigvecs)
         eigvecs = np.transpose(eigvecs, axes=(0, 2, 1))
-    
 
         if ret_eigvecs:
             return eigvals, eigvecs
         else:
             return eigvals
+        
+
+    def interp_op(self, O_k, k_path):
+        k_mesh = self.K_mesh.full_mesh
+        k_idx_arr = self.K_mesh.idx_arr
+        Nk = np.prod([self.K_mesh.nks])
+        
+        # Fourier transform to real space
+        O_R = np.zeros((len(self.supercell), *O_k.shape[2:]), dtype=complex)
+        for idx, (x, y) in enumerate(self.supercell):
+            for k_idx in k_idx_arr:
+                R_vec = np.array([x, y])
+                phase = np.exp(-1j * 2 * np.pi * np.vdot(k_mesh[k_idx], R_vec))
+                O_R[idx] += O_k[k_idx] * phase / Nk
+
+        # interpolate to arbitrary k
+        O_k_interp = np.zeros((k_path.shape[0], *O_R.shape[2:]), dtype=complex)
+        for k_idx, k in enumerate(k_path):
+            for idx, (x, y) in enumerate(self.supercell):
+                R_vec = np.array([x, y])
+                phase = np.exp(1j * 2 * np.pi * np.vdot(k, R_vec))
+                O_k_interp[k_idx] += O_R[idx] * phase
+
+        return O_k_interp
 
 
     def report(self):
@@ -2111,7 +2230,7 @@ class Wannier():
         kwargs_lat={'s':10, 'marker': 'o', 'c':'k'}, fig=None, ax=None
     ):
         lat_vecs = self.model.get_lat_vecs()
-        orbs = self.model.get_orb(Cartesian=False)
+        orbs = self.model.get_orb_vecs(Cartesian=False)
         centers = self.centers
 
         # Initialize arrays to store positions and weights
@@ -2266,6 +2385,7 @@ class Wannier():
         ax.set_ylim(center_sc[1] - pmy, center_sc[1] + pmy)
 
         ax.set_title(title)
+        # ax.axis('off')
 
         # Saving
         if save_name is not None:
