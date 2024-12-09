@@ -49,3 +49,20 @@ def Haldane(delta, t, t2):
         model.set_hop(t2*-1j, 1, 1, lvec, mode='reset')
 
     return model
+
+
+def kagome(t1, t2):
+
+    lat_vecs = [[1, 0], [1/2, np.sqrt(3)/2]]
+    orb_vecs = [[0,0], [1/2, 0], [0, 1/2]]
+
+    model = Model(2, 2, lat_vecs, orb_vecs)
+
+    model.set_hop(t1+1j*t2, 0, 1, [0, 0])
+    model.set_hop(t1+1j*t2, 2, 0, [0, 0])
+    model.set_hop(t1+1j*t2, 0, 1, [-1, 0])
+    model.set_hop(t1+1j*t2, 2, 0, [0, 1])
+    model.set_hop(t1+1j*t2, 1, 2, [0, 0])
+    model.set_hop(t1+1j*t2, 1, 2, [1, -1])
+
+    return model

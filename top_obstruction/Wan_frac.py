@@ -18,7 +18,7 @@ import pickle
 
 delta = 1
 t = 1
-t2 = -0.4
+t2 = -0.3
 
 n_super_cell = 5
 model = models.Haldane(delta, t, t2).make_supercell([[n_super_cell, 0], [0, n_super_cell]])
@@ -42,6 +42,8 @@ n_tfs = np.array([i for i in range(n_occ-1, 0, -1)])
 Wan_frac = n_tfs/n_occ
 WFs_n_tfs = {}
 
+print(name)
+
 for idx, n_tf in enumerate(n_tfs):
     print(Wan_frac[idx])
 
@@ -49,9 +51,9 @@ for idx, n_tf in enumerate(n_tfs):
     WFs = Wannier(model, [20, 20])
     WFs.single_shot(tf_list)
 
-    WFs.max_loc(
-        verbose=True, iter_num_omega_i=10000, iter_num_omega_til=20000, 
-        tol_omega_i=1e-3, tol_omega_til=1e-3, grad_min=1, eps=1e-4
+    WFs.ss_maxloc(
+        verbose=True, iter_num_omega_i=20000, iter_num_omega_til=50000, 
+        tol_omega_i=1e-3, tol_omega_til=1e-3, grad_min=1e-1, eps=5e-4
         )
     
     WFs_n_tfs[n_tf] = WFs
