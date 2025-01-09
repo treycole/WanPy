@@ -1,0 +1,3 @@
+[submodule "reduced-wannier-representation"]
+	path = reduced-wannier-representation
+	url = https://github.com/treycole/reduced-wannier-representation
