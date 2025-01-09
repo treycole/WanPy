@@ -1,8 +1,8 @@
 from pythtb import *
 from numpy import sqrt
-# import sys
-# sys.path.append("../WanPy")
-from WanPy.wanpy.wpythtb import Model
+import sys
+sys.path.append("../wanpy")
+from wpythtb import Model
 
 # used for testing purposes
 

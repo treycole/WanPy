@@ -1,11 +1,10 @@
-from pythtb import *
-from typing import TYPE_CHECKING
 import numpy as np
 from itertools import product
 from itertools import combinations_with_replacement as comb
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
 from pythtb import tb_model, wf_array
+import copy
 
 
 class Model(tb_model):
