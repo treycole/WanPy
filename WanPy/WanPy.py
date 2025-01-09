@@ -1,12 +1,6 @@
 import numpy as np
-from pythtb import wf_array
 from itertools import product
 from itertools import combinations_with_replacement as comb
-# from scipy.linalg import expm
-# from scipy.sparse.linalg import eigsh
-# from scipy.sparse.linalg import eigs
-import os
-cwd = os.getcwd() 
 
 
 def get_recip_lat_vecs(lat_vecs):
@@ -155,7 +149,7 @@ def get_bloch_wfs(orbs, u_wfs, k_mesh, inverse=False):
 
     Args:
     orbs (np.array): Orbital positions
-    wfs (pythtb.wf_array): cell periodic wfs [k, nband, norb]
+    wfs (): cell periodic wfs [k, nband, norb]
     k_mesh (np.array): k-mesh on which u_wfs is defined
 
     Returns:
@@ -163,12 +157,7 @@ def get_bloch_wfs(orbs, u_wfs, k_mesh, inverse=False):
         wfs with orbitals multiplied by proper phase factor
 
     """
-    if isinstance(u_wfs, wf_array):
-        shape = u_wfs._wfs.shape  # [*nks, idx, orb]
-        u_wfs = u_wfs._wfs
-    else:
-        shape = u_wfs.shape  # [*nks, idx, orb]
-
+    shape = u_wfs.shape  # [*nks, idx, orb]
     nks = shape[:-2]
     norb = shape[-1]  # number of orbitals
 
@@ -329,7 +318,7 @@ def Wannierize(
 
     Args:
         orbs (np.array): Orbital positions
-        u_wfs (pythtb.wf_array): wf array defined k-mesh excluding endpoints.
+        u_wfs (np.ndarray): wf array defined k-mesh excluding endpoints.
         tf_list (list): list of sites and amplitudes of trial wfs
         n_occ (int): number of occupied states to Wannierize from
 
@@ -340,16 +329,8 @@ def Wannierize(
     Returns:
         w_0n (np.array): Wannier functions in home unit cell
     """
-    if isinstance(u_wfs, wf_array):
-        shape = u_wfs._wfs.shape  # [*nks, idx, orb]
-    else:
-        shape = u_wfs.shape  # [*nks, idx, orb]
-    # try:
-    #     shape = u_wfs.shape  # [*nks, idx, orb]
-    # except AttributeError:
-    #     shape = u_wfs._wfs.shape  # [*nks, idx, orb]
-    #     u_wfs = u_wfs._wfs
-
+    
+    shape = u_wfs.shape  # [*nks, idx, orb]
     nks = shape[:-2]
 
     # get Bloch wfs
@@ -459,17 +440,13 @@ def k_overlap_mat(lat_vecs, orbs, u_wfs):
     internally.
 
     Args:
-        u_wfs (np.array | wf_array): The cell periodic Bloch wavefunctions
-        orbs (np.array): The orbitals positions
+        u_wfs (np.ndarray): The cell periodic Bloch wavefunctions
+        orbs (np.ndarray): The orbitals positions
     Returns:
         M (np.array): overlap matrix
     """
-    if isinstance(u_wfs, wf_array):
-        shape = u_wfs._wfs.shape  # [*nks, idx, orb]
-        u_wfs = np.array(u_wfs._wfs)
-    else:
-        shape = u_wfs.shape  # [*nks, idx, orb]
-
+   
+    shape = u_wfs.shape  # [*nks, idx, orb]
     nks = shape[:-2]
     n_states = shape[-2]
 
@@ -609,7 +586,7 @@ def diag_h_in_subspace(model, eigvecs, k_path, ret_evecs=False):
     Args:
         model (pythtb.model):
             model to obtain Bloch Hamiltonian
-        eigvecs (np.array | pythtb.wf_array):
+        eigvecs (np.ndarray):
             Eigenvectors spanning the target subspace
         k_path (np.array):
             1D path on which we want to diagonalize the Hamiltonian
@@ -618,11 +595,8 @@ def diag_h_in_subspace(model, eigvecs, k_path, ret_evecs=False):
         eigvals (np.array):
             eigenvalues in subspace
     """
-    if isinstance(eigvecs, wf_array):
-        shape = eigvecs._wfs.shape  # [*nks, idx, orb]
-    else:
-        shape = eigvecs.shape  # [*nks, idx, orb]
-
+   
+    shape = eigvecs.shape  # [*nks, idx, orb]
     nks = shape[:-2]
     n_orb = shape[-1]
     n_states = shape[-2]
@@ -656,12 +630,7 @@ def diag_h_in_subspace(model, eigvecs, k_path, ret_evecs=False):
 def find_optimal_subspace(
     lat_vecs, orbs, outer_states, inner_states, iter_num=100, verbose=False, tol=1e-17, alpha=1
 ):
-    if isinstance(inner_states, wf_array):
-        shape = inner_states._wfs.shape  # [*nks, idx, orb]
-        inner_states = np.array(inner_states._wfs)
-    else:
-        shape = inner_states.shape  # [*nks, idx, orb]
-
+    shape = inner_states.shape  # [*nks, idx, orb]
     nks = shape[:-2]
     Nk = np.prod(nks)
     n_orb = shape[-1]
@@ -743,25 +712,6 @@ def mat_exp(M):
     expM = np.einsum('...ij,...jk->...ik', U, np.multiply(U_inv, exp_diagM[..., :, np.newaxis]))
     return expM
 
-class AdamOptimizer:
-    def __init__(self, shape, lr=1e-3, beta1=0.9, beta2=0.999, eps=1e-8):
-        self.lr = lr
-        self.beta1 = beta1
-        self.beta2 = beta2
-        self.eps = eps
-        self.m = np.zeros(shape, dtype=np.complex128)
-        self.v = np.zeros(shape, dtype=np.complex128)
-        self.t = 0
-
-    def update(self, grads):
-        self.t += 1
-        self.m = self.beta1 * self.m + (1 - self.beta1) * grads
-        self.v = self.beta2 * self.v + (1 - self.beta2) * (grads ** 2)
-        m_hat = self.m / (1 - self.beta1 ** self.t)
-        v_hat = self.v / (1 - self.beta2 ** self.t)
-        update = self.lr * m_hat / (np.sqrt(v_hat) + self.eps)
-        return update
-
 def find_min_unitary(u_wfs, lat_vecs, orbs, eps=1 / 160, iter_num=10, verbose=False, tol=1e-12):
     """
     Finds the unitary that minimizing the gauge dependent part of the spread. 
@@ -797,7 +747,6 @@ def find_min_unitary(u_wfs, lat_vecs, orbs, eps=1 / 160, iter_num=10, verbose=Fa
     M = np.copy(M)  # new overlap matrix
 
     # initializing
-    # optimizer = AdamOptimizer(U.shape, lr=eps)
     grad_mag_prev = 0
     eta = 1
     for i in range(iter_num):
@@ -870,7 +819,6 @@ def max_loc_Wan(
     return_spread=False,
     verbose=False,
     report=True,
-    save=False, save_name=''
 ):
     """
     Find the maximally localized Wannier functions using the projection method.
@@ -891,10 +839,8 @@ def max_loc_Wan(
         report(bool): Whether to print the final spread and Wannier centers
 
     """
-    if isinstance(u_wfs, wf_array):
-        shape = u_wfs._wfs.shape  # [*nks, idx, orb]
-    else:
-        shape = u_wfs.shape  # [*nks, idx, orb]
+    
+    shape = u_wfs.shape  # [*nks, idx, orb]
     nks = shape[:-2]  # tuple defining number of k points in BZ
 
     # get Bloch wfs by adding phase factors
@@ -940,17 +886,6 @@ def max_loc_Wan(
         print(rf"Omega_tilde = {spread[2]}")
         print(f"<\\vec{{r}}>_n = {expc_r}")
         print(f"<r^2>_n = {expc_rsq}")
-
-    if save:
-        sv_dir = 'data'
-        if not os.path.exists(sv_dir):
-            os.makedirs(sv_dir)
-        sv_prefix = 'W0_max_loc'
-        np.save(f"{sv_dir}/{sv_prefix}_{save_name}", w0)
-        sv_prefix = 'W0_max_loc_cntrs'
-        np.save(f"{sv_dir}/{sv_prefix}_{save_name}", expc_r)
-        sv_prefix = 'u_wfs_max_loc'
-        np.save(f"{sv_dir}/{sv_prefix}_{save_name}", u_max_loc)
 
     ret_pckg = [w0]
     if return_uwfs:
