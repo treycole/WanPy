@@ -231,8 +231,8 @@ class Model(tb_model):
     
     def Chern_QGT(self, Omega=None):
         if Omega is None:
-            nkx, nky = 50, 50
-            k_mesh = K_mesh(self, nkx, nky)
+            nks = (50,) * self._dim_k
+            k_mesh = K_mesh(self, *nks)
             full_mesh = k_mesh.gen_k_mesh(endpoint=False)
 
             QGT = self.quantum_geom_tens(full_mesh)
@@ -512,7 +512,7 @@ class K_mesh():
         dk = np.array([self.model._recip_lat_vecs[i] / nk for i, nk in enumerate(self.nks)])
         # array of integers e.g. in 2D for N_sh = 1 would be [0,1], [1,0], [0,-1], [-1,0]
         nnbr_idx = list(product(list(range(-N_sh, N_sh + 1)), repeat=len(self.nks)))
-        nnbr_idx.remove((0, 0))
+        nnbr_idx.remove((0,)*self.dim)
         nnbr_idx = np.array(nnbr_idx)
         # vectors connecting k-points near Gamma point (in inverse lattice vector units)
         b_vecs = np.array([nnbr_idx[i] @ dk for i in range(nnbr_idx.shape[0])])
