@@ -377,7 +377,7 @@ class Model(tb_model):
     def plot_bands(
         self, k_path, nk=101, k_label=None, red_lat_idx=None, 
         fig=None, ax=None, title=None, scat_size=3, 
-        lw=3, lc='b', ls='solid', cmap="bwr", show=False, label=None, cbar=True
+        lw=2, lc='b', ls='solid', cmap="bwr", show=False, cbar=True
         ):
         """
 
@@ -417,7 +417,7 @@ class Model(tb_model):
         else:
             # continuous bands
             for n in range(n_eigs):
-                ax.plot(k_dist, evals[:, n], c=lc, lw=lw, ls=ls, label=label)
+                ax.plot(k_dist, evals[:, n], c=lc, lw=lw, ls=ls)
 
         ax.set_xlim(0, k_node[-1])
         ax.set_xticks(k_node)
@@ -511,7 +511,7 @@ class K_mesh():
         # basis vectors connecting neighboring mesh points (in inverse Cartesian units)
         dk = np.array([self.model._recip_lat_vecs[i] / nk for i, nk in enumerate(self.nks)])
         # array of integers e.g. in 2D for N_sh = 1 would be [0,1], [1,0], [0,-1], [-1,0]
-        nnbr_idx = list(product(list(range(-N_sh, N_sh + 1)), repeat=len(self.nks)))
+        nnbr_idx = list(product(list(range(-N_sh, N_sh + 1)), repeat=self.dim))
         nnbr_idx.remove((0,)*self.dim)
         nnbr_idx = np.array(nnbr_idx)
         # vectors connecting k-points near Gamma point (in inverse lattice vector units)
@@ -649,6 +649,7 @@ class Bloch():
         
         Wavefunctions are defined on a semi-full reciprocal space mesh.
         """
+        assert len(nks) == model._dim_k, "Number of k-points must match model dimensionality"
         self.model: Model = model
         self.K_mesh: K_mesh = K_mesh(model, *nks)
         self.set_Bloch_ham()
@@ -743,7 +744,9 @@ class Bloch():
         self._Q_nbr = np.zeros((*nks, num_nnbrs, n_orb, n_orb), dtype=complex)
         for idx, idx_vec in enumerate(nnbr_idx_shell[0]):  # nearest neighbors
             # accounting for phase across the BZ boundary
-            states_pbc = np.roll(self._u_wfs, shift=tuple(-idx_vec), axis=(0,1)) * self.K_mesh.bc_phase[..., idx, np.newaxis,  :]
+            states_pbc = np.roll(
+                self._u_wfs, shift=tuple(-idx_vec), axis=[i for i in range(self.K_mesh.dim)]
+                ) * self.K_mesh.bc_phase[..., idx, np.newaxis,  :]
             self._P_nbr[..., idx, :, :] = np.einsum(
                     "...ni, ...nj -> ...ij", states_pbc, states_pbc.conj()
                     )
@@ -794,7 +797,9 @@ class Bloch():
         
         for idx, idx_vec in enumerate(idx_shell[0]):  # nearest neighbors
             # introduce phases to states when k+b is across the BZ boundary
-            states_pbc = np.roll(self._u_wfs, shift=tuple(-idx_vec), axis=(0,1)) * bc_phase[..., idx, np.newaxis,  :]
+            states_pbc = np.roll(
+                self._u_wfs, shift=tuple(-idx_vec), axis=[i for i in range(self.K_mesh.dim)]
+                ) * bc_phase[..., idx, np.newaxis,  :]
             M[..., idx, :, :] = np.einsum("...mj, ...nj -> ...mn", self._u_wfs.conj(), states_pbc)
         return M
     
@@ -906,44 +911,74 @@ class Bloch():
 
     def berry_flux_plaq(self, state_idx=None):
         "Compute fluxes on a two-dimensional plane of states."
+
         wfs = self.get_states()["Cell periodic"]
         orb_vecs = self.model._orb_vecs
-        # size of the mesh
-        nks = self.K_mesh.nks
-        nk0 = wfs.shape[0]
-        nk1 = wfs.shape[1]
-
-        # here store flux through each plaquette of the mesh
-        all_phases = np.zeros((nk0, nk1), dtype=float)
 
         if state_idx is not None:
             wfs = np.take(wfs, state_idx, axis=-2)
 
-        # go over all plaquettes
-        for i in range(nk0):
-            for j in range(nk1):
-                wf_use = [wfs[i, j]]
+        # size of the mesh
+        nks = self.K_mesh.nks
+        dim = self.K_mesh.dim
 
-                # generate a small loop made out of four pieces
-                nbrs = [[i+1, j], [i+1, j+1], [i, j+1]]
-                for nbr in nbrs:
-                    mod_idx = np.mod(nbr, nks) # apply pbc to index
-                    wf_nbr = np.copy(wfs[tuple(mod_idx)]) # copy to prevent modifying original array
+        # here store flux through each plaquette of the mesh
+        Berry_flux = np.zeros((dim, dim, *nks), dtype=float)
 
-                    diff = nbr - mod_idx # if mod changed nbr, will be non-zero
-                    if np.any(diff):
-                        G = np.divide(np.array(diff), np.array(nks))  # will be pm 1 where crossed, 0 else
-                        phase = np.exp(-2j * np.pi * G @ orb_vecs.T)
-                        wf_nbr *= phase[np.newaxis, ...]
-                    
-                    wf_use.append(wf_nbr)
-                
-                wf_use.append(wfs[i, j])
-                wf_use = np.array(wf_use, dtype=complex)
-                # calculate phase around one plaquette
-                all_phases[i, j] = self.berry_loop(wf_use)
+        for i in range(dim):
+            for j in range(i + 1, dim):
+                phases_plane = np.zeros(nks, dtype=float)
 
-        return all_phases
+                # Loop over all plaquettes in this plane
+                for idx in np.ndindex(*nks):
+                    idx = np.array(idx)
+
+                    # Define the 4 points of the plaquette
+                    plaquette_points = [
+                        idx,
+                        idx + np.array([1 if k == i else 0 for k in range(dim)]),
+                        idx + np.array([1 if k == i else 0 for k in range(dim)])
+                            + np.array([1 if k == j else 0 for k in range(dim)]),
+                        idx + np.array([1 if k == j else 0 for k in range(dim)])
+                    ]
+
+                    # Extract wavefunctions for the loop
+                    wf_use = []
+
+                    for p in plaquette_points:
+                        mod_idx = np.mod(p, nks)  # Apply PBC to index
+                        wf_nbr = np.copy(wfs[tuple(mod_idx)])
+
+                        # Detect boundary crossing
+                        diff = p - mod_idx  # Nonzero if crossing occurred
+                        if np.any(diff):  # If boundary was crossed
+                            G = np.divide(diff, nks)  # Fractional G-vector for crossing
+                            phase = np.exp(-2j * np.pi * G @ orb_vecs.T)
+                            wf_nbr *= phase[np.newaxis, ...]
+                        
+                        wf_use.append(wf_nbr)
+
+                    # Close the loop
+                    wf_use.append(wfs[tuple(np.mod(plaquette_points[0], nks))])
+                    wf_use = np.array(wf_use, dtype=complex)
+
+                    # Compute Berry phase for this plaquette
+                    phases_plane[tuple(idx)] = self.berry_loop(wf_use)
+        
+                # Store the phases for this plane
+                Berry_flux[i, j] = phases_plane
+                Berry_flux[j, i] = -phases_plane
+
+        return Berry_flux
+    
+    def berry_curv(self, state_idx=None):
+        nks = self.K_mesh.nks
+        N_cells = np.prod([ nk -1 for nk in nks])
+        A_plaq = self.model.get_recip_vol() / (N_cells)
+
+        # Occupied states
+        Berry_curv = self.berry_flux_plaq(state_idx=state_idx) / A_plaq
+        return Berry_curv
     
 
     def trace_metric(self):
