@@ -1206,7 +1206,7 @@ class Bloch(wf_array):
             n_occ = int(self.model._n_orb/2)
             band_idxs = np.arange(n_occ) # assume half-filled occupied
 
-        berry_flux = self.berry_flux_plaq(state_idx=np.arange(n_occ))
+        berry_flux = self.berry_flux_plaq(state_idx=band_idxs)
         Chern = np.sum(berry_flux[dirs]/(2*np.pi))
 
         return Chern
