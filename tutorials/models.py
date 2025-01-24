@@ -6,7 +6,7 @@ from wpythtb import Model
 
 # used for testing purposes
 
-def chessboard(t0, tprime, delta):
+def checkerboard(t0, tprime, delta):
     # define lattice vectors
     lat=[[1.0, 0.0], [0.0, 1.0]]
     # define coordinates of orbitals

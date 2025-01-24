@@ -1,0 +1,1 @@
+arXiv:2412.17084, ["Reduced Wannier Representation for Topological Bands"](https://arxiv.org/abs/2412.17084). Repository hosting code to generate results used in the paper [reduced-wannier-representation](https://github.com/treycole/reduced-wannier-representation).
