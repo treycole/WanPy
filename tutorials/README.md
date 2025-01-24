@@ -1,0 +1,1 @@
+arXiv:2412.17084, ["Reduced Wannier Representation for Topological Bands"](https://arxiv.org/abs/2412.17084)
