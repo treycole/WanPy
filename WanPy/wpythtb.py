@@ -489,6 +489,7 @@ class K_mesh():
         self.nks = nks
         self.Nk = np.prod(nks)
         self.dim: int = len(nks)
+        self.recip_lat_vecs = model.get_recip_lat_vecs()
         self.idx_arr: list = list(product(*[range(nk) for nk in nks]))  # 1D list of all k_indices (integers)
         self.square_mesh: np.ndarray = self.gen_k_mesh(flat=False, endpoint=False) # each index is a direction in k-space
         self.flat_mesh: np.ndarray = self.gen_k_mesh(flat=True, endpoint=False) # 1D list of k-vectors
@@ -689,12 +690,13 @@ class K_mesh():
         return phase
 
 
-class Bloch():
+class Bloch(wf_array):
     def __init__(self, model: Model, *nks):
         """Class for storing and manipulating Bloch like wavefunctions.
         
         Wavefunctions are defined on a semi-full reciprocal space mesh.
         """
+        super().__init__(model, [*nks])
         assert len(nks) == model._dim_k, "Set of k-points must match model dimensionality"
         self.model: Model = model
         self.k_mesh: K_mesh = K_mesh(model, *nks)
@@ -977,7 +979,7 @@ class Bloch():
         return A
     
 
-    def berry_phase(self, dir=0):
+    def berry_phase(self, dir=0, state_idx=None, evals=False):
         """
         Computes Berry phases for wavefunction arrays defined in parameter space.
 
@@ -994,27 +996,34 @@ class Bloch():
                 Berry phases for the specified parameter space direction.
         """
         wfs = self.get_states()["Cell periodic"]
+        if state_idx is not None:
+            wfs = np.take(wfs, state_idx, axis=self.state_axis)
+        orb_vecs = self.model.get_orb_vecs()
         dim_param = self.k_mesh.dim  # dimensionality of parameter space
         param_axes = np.arange(0, dim_param)  # parameter axes
         param_axes = np.setdiff1d(param_axes, dir)  # remove dir from axes to loop
         lens = [wfs.shape[ax] for ax in param_axes]  # sizes of loop directions
         idxs = np.ndindex(*lens)  # index mesh
         
-        phase = np.zeros((*lens, wfs.shape[-2]))
-        
+        phase = np.zeros((*lens, wfs.shape[dim_param]))
+
+        G = np.zeros(dim_param)
+        G[0] = 1
+        phase_shift = np.exp(-1j * 2 * np.pi * (orb_vecs @ G.T))
+        print(param_axes)
         for idx_set in idxs:
+            # print(idx_set)
             # take wfs along loop axis at given idex
             sliced_wf = wfs.copy()
             for ax, idx in enumerate(idx_set):
+                # print(param_axes[ax])
                 sliced_wf = np.take(sliced_wf, idx, axis=param_axes[ax])
 
-            # wf now has 3 indices: [phase ax, eigval idx, orb amp]
-            for n in range(sliced_wf.shape[-2]): # loop over eigval idxs
-                prod = np.prod(
-                    [ np.vdot(sliced_wf[i, n], sliced_wf[i+1, n]) 
-                    for i in range(sliced_wf.shape[0]-1) ] )
-                prod *= np.vdot(sliced_wf[-1, n], sliced_wf[0, n])
-                phase[idx_set][n] = -np.angle(prod)
+            # print(sliced_wf.shape)
+            end_state = sliced_wf[0,...] * phase_shift[np.newaxis, :, np.newaxis]
+            sliced_wf = np.append(sliced_wf, end_state[np.newaxis, ...], axis=0)
+            phases = self.berry_loop(sliced_wf, evals=evals)
+            phase[idx_set] = phases
 
         return phase        
 
@@ -1069,9 +1078,13 @@ class Bloch():
             return U_wilson
         
         
-    def berry_loop(self, wfs_loop):
-        U_wilson = self.wilson_loop(wfs_loop)
-        return -np.angle(np.linalg.det(U_wilson)) # total Berry phase
+    def berry_loop(self, wfs_loop, evals=False):
+        U_wilson = self.wilson_loop(wfs_loop, evals=evals)
+
+        if evals:
+            return U_wilson[1]
+        else:
+            return -np.angle(np.linalg.det(U_wilson)) # total Berry phase
          
     
     def berry_flux_plaq(self, state_idx=None, non_Abelian=False):
@@ -1239,7 +1252,7 @@ class Bloch():
 
     def interp_op(self, O_k, k_path, plaq=False):
         k_mesh = np.copy(self.k_mesh.square_mesh)
-        k_idx_arr = self.K_mesh.idx_arr
+        k_idx_arr = self.k_mesh.idx_arr
         nks = self.k_mesh.nks
         dim_k = len(nks)
         Nk = np.prod([nks])
@@ -1344,7 +1357,7 @@ class Wannier():
             ):
         self.model: Model = model
         self._nks: list = nks
-        self.K_mesh: K_mesh = K_mesh(model, *nks)
+        self.k_mesh: K_mesh = K_mesh(model, *nks)
 
         self.energy_eigstates: Bloch = Bloch(model, *nks)
         self.energy_eigstates.solve_model()
@@ -1501,11 +1514,11 @@ class Wannier():
                 and the expectation of the position vector squared
         """
         M = self.tilde_states._M
-        w_b, k_shell, _ = self.K_mesh.get_weights()
+        w_b, k_shell, _ = self.k_mesh.get_weights()
         w_b, k_shell = w_b[0], k_shell[0] # Assume only one shell for now
 
         n_states = self.tilde_states._n_states
-        nks = self.tilde_states.K_mesh.nks
+        nks = self.tilde_states.k_mesh.nks
         k_axes = tuple([i for i in range(len(nks))])
         Nk = np.prod(nks)
 
@@ -1531,8 +1544,8 @@ class Wannier():
         
 
     def _get_Omega_til(self, M, w_b, k_shell):
-        nks = self.tilde_states.K_mesh.nks
-        Nk = self.tilde_states.K_mesh.Nk
+        nks = self.tilde_states.k_mesh.nks
+        Nk = self.tilde_states.k_mesh.Nk
         k_axes = tuple([i for i in range(len(nks))])
 
         diag_M = np.diagonal(M, axis1=-1, axis2=-2)
@@ -1549,7 +1562,7 @@ class Wannier():
 
 
     def _get_Omega_I(self, M, w_b, k_shell):
-        Nk = self.tilde_states.K_mesh.Nk
+        Nk = self.tilde_states.k_mesh.Nk
         n_states = self.tilde_states._n_states
         Omega_i = w_b * n_states * k_shell.shape[0] - (1 / Nk) * w_b * np.sum(abs(M) **2)
         return Omega_i
@@ -1563,10 +1576,10 @@ class Wannier():
             P, Q = self.energy_eigstates.get_projector(return_Q=True)
             _, Q_nbr = self.energy_eigstates.get_nbr_projector(return_Q=True)
 
-        nks = self.K_mesh.nks
+        nks = self.k_mesh.nks
         Nk = np.prod(nks)
-        num_nnbrs = self.K_mesh.num_nnbrs
-        w_b, _, idx_shell = self.K_mesh.get_weights(N_sh=1)
+        num_nnbrs = self.k_mesh.num_nnbrs
+        w_b, _, idx_shell = self.k_mesh.get_weights(N_sh=1)
 
         T_kb = np.zeros((*nks, num_nnbrs), dtype=complex)
         for idx, idx_vec in enumerate(idx_shell[0]):  # nearest neighbors
@@ -1587,10 +1600,10 @@ class Wannier():
             P = self.energy_eigstates.get_projector()
             _, Q_nbr = self.energy_eigstates.get_nbr_projector(return_Q=True)
     
-        nks = self.K_mesh.nks
+        nks = self.k_mesh.nks
         Nk = np.prod(nks)
-        num_nnbrs = self.K_mesh.num_nnbrs
-        w_b, _, idx_shell = self.K_mesh.get_weights(N_sh=1)
+        num_nnbrs = self.k_mesh.num_nnbrs
+        w_b, _, idx_shell = self.k_mesh.get_weights(N_sh=1)
 
         T_kb = np.zeros((*nks, num_nnbrs), dtype=complex)
         for idx, idx_vec in enumerate(idx_shell[0]):  # nearest neighbors
@@ -1601,10 +1614,10 @@ class Wannier():
     def get_omega_I_k(self):
         P = self.tilde_states.get_projector()
         P_nbr, Q_nbr = self.tilde_states.get_nbr_projector(return_Q=True)
-        nks = self.K_mesh.nks
+        nks = self.k_mesh.nks
         Nk = np.prod(nks)
-        num_nnbrs = self.K_mesh.num_nnbrs
-        w_b, _, idx_shell = self.K_mesh.get_weights(N_sh=1)
+        num_nnbrs = self.k_mesh.num_nnbrs
+        w_b, _, idx_shell = self.k_mesh.get_weights(N_sh=1)
 
         T_kb = np.zeros((*nks, num_nnbrs), dtype=complex)
         for idx, idx_vec in enumerate(idx_shell[0]):  # nearest neighbors
@@ -1773,9 +1786,9 @@ class Wannier():
         N_outer = (~masked_outer_states.mask).sum(axis=(-1,-2))//n_orb
 
         # Assumes only one shell for now
-        w_b, _, idx_shell = self.K_mesh.get_weights(N_sh=1)
-        num_nnbrs = self.K_mesh.num_nnbrs
-        bc_phase = self.K_mesh.bc_phase
+        w_b, _, idx_shell = self.k_mesh.get_weights(N_sh=1)
+        num_nnbrs = self.k_mesh.num_nnbrs
+        bc_phase = self.k_mesh.bc_phase
         
         # Projector of initial tilde subspace at each k-point
         P = init_states.get_projector()
@@ -1877,8 +1890,8 @@ class Wannier():
         n_occ = int(n_orb/2)
 
         # Assumes only one shell for now
-        w_b, _, idx_shell = self.K_mesh.get_weights(N_sh=1)
-        bc_phase = self.K_mesh.bc_phase
+        w_b, _, idx_shell = self.k_mesh.get_weights(N_sh=1)
+        bc_phase = self.k_mesh.bc_phase
 
         # initial subspace
         init_states = self.tilde_states
@@ -2010,7 +2023,7 @@ class Wannier():
             U: The unitary matrix
         """
         M = self.tilde_states._M
-        w_b, k_shell, idx_shell = self.K_mesh.get_weights()
+        w_b, k_shell, idx_shell = self.k_mesh.get_weights()
         # Assumes only one shell for now
         w_b, k_shell, idx_shell = w_b[0], k_shell[0], idx_shell[0]
         nks = self._nks
@@ -2180,9 +2193,9 @@ class Wannier():
         H_k = self.get_Bloch_Ham()
         H_rot_k = u_tilde[..., :, :].conj() @ H_k @ np.transpose(u_tilde[..., : ,:], axes=(0,1,3,2))
 
-        k_mesh = self.K_mesh.square_mesh
-        k_idx_arr = self.K_mesh.idx_arr
-        nks = self.K_mesh.nks
+        k_mesh = self.k_mesh.square_mesh
+        k_idx_arr = self.k_mesh.idx_arr
+        nks = self.k_mesh.nks
         Nk = np.prod([nks])
 
         supercell = list(product(*[range(-int((nk-nk%2)/2), int((nk-nk%2)/2)+1) for nk in nks]))
