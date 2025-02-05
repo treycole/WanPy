@@ -438,8 +438,9 @@ class Model(tb_model):
                 scat = ax.scatter(k_dist, evals[:, n], c=col[:, n], cmap=cmap, marker='o', s=scat_size, vmin=0, vmax=1, zorder=2)
 
             if cbar:
-                cbar = fig.colorbar(scat, ticks=[1,0])
-                cbar.ax.set_yticklabels([r'$\psi_2$', r'$\psi_1$'], size=12)
+                cbar = fig.colorbar(scat, ticks=[1,0], pad=0.01)
+                cbar.set_ticks([])
+                # cbar.ax.set_yticklabels([r'$\psi_2$', r'$\psi_1$'], size=12)
 
         elif proj_spin:
             evals, evecs = self.solve_ham(k_vec, return_eigvecs=True)
@@ -638,7 +639,11 @@ class K_mesh():
 
         """
         idx_shell = self.nnbr_idx_shell
-        bc_phase = np.ones((*self.nks, idx_shell[0].shape[0], self.model._orb_vecs.shape[0]), dtype=complex)
+        if self.model._nspin == 1:
+            bc_phase = np.ones((*self.nks, idx_shell[0].shape[0], self.model._orb_vecs.shape[0]), dtype=complex)
+        else:
+            bc_phase = np.ones((*self.nks, idx_shell[0].shape[0], self.model._orb_vecs.shape[0], 2), dtype=complex)
+
         for k_idx in self.idx_arr: # each index in k-mesh
             for shell_idx, idx_vec in enumerate(idx_shell[0]):  # vecs connecting neighboring indices
                 k_nbr_idx = np.array(k_idx) + idx_vec # indices for neighboring k
@@ -648,7 +653,14 @@ class K_mesh():
                 # if the translated k-index contains -1 or nk_i+1 then we crossed the BZ boundary
                 cross_bndry = np.any((k_nbr_idx == -1) | np.logical_or.reduce([k_nbr_idx == nk for nk in self.nks]))
                 if cross_bndry:
-                    bc_phase[k_idx][shell_idx]= np.exp(-1j * 2 * np.pi * self.model._orb_vecs @ G.T).T
+                    if self.model._nspin == 1:
+                        bc_phase[k_idx][shell_idx] = np.exp(-1j * 2 * np.pi * self.model._orb_vecs @ G.T).T
+                    else:
+                        bc_phase[k_idx][shell_idx, :] = np.exp(-1j * 2 * np.pi * self.model._orb_vecs @ G.T).T[..., np.newaxis]
+
+        if self.model._nspin == 2:
+            bc_phase = bc_phase.reshape(*bc_phase.shape[:self.dim+1], -1)
+                    
 
         return bc_phase
     
@@ -700,6 +712,7 @@ class Bloch(wf_array):
         assert len(nks) == model._dim_k, "Set of k-points must match model dimensionality"
         self.model: Model = model
         self.k_mesh: K_mesh = K_mesh(model, *nks)
+        self._n_orb = model.get_num_orbitals()
         self._nspin = self.model._nspin
         self.set_Bloch_ham()
 
@@ -729,10 +742,17 @@ class Bloch(wf_array):
         self.energies = eigvals
 
     # Retrievers 
-    def get_states(self):
+    def get_states(self, flatten_spin=False):
         """Returns dictionary containing Bloch and cell-periodic eigenstates."""
         assert hasattr(self, "_psi_wfs"), "Need to call `solve_model` or `set_wfs` to initialize Bloch states"
-        return {"Bloch": self._psi_wfs, "Cell periodic": self._u_wfs}
+        psi_wfs = self._psi_wfs
+        u_wfs = self._u_wfs
+
+        if flatten_spin:
+            psi_wfs = psi_wfs.reshape((*psi_wfs.shape[:self.k_mesh.dim+1], -1))
+            u_wfs = u_wfs.reshape((*u_wfs.shape[:self.k_mesh.dim+1], -1))
+
+        return {"Bloch": psi_wfs,  "Cell periodic": u_wfs}
     
     def get_projector(self, return_Q = False):
         assert hasattr(self, "_P"), "Need to call `solve_model` or `set_wfs` to initialize Bloch states"
@@ -764,7 +784,6 @@ class Bloch(wf_array):
         assert hasattr(self, "_M"), "Need to call `solve_model` or `set_wfs` to initialize overlap matrix"
         return self._M
     
-
     def set_wfs(self, wfs, cell_periodic: bool=True, impose_pbc=True):
         """
         Sets the Bloch and cell-periodic eigenstates as class attributes.
@@ -781,7 +800,7 @@ class Bloch(wf_array):
         self.orb_axis = self.k_mesh.dim + 1
 
         self._n_states = wfs.shape[self.state_axis]
-        self._n_orb = wfs.shape[self.orb_axis]
+        self._n_orb = self.model.get_num_orbitals()
 
         if self._nspin == 2:
             # shape is expected to be [..., nstate, norb, nspin]
@@ -789,19 +808,19 @@ class Bloch(wf_array):
        
         if cell_periodic:
             self._u_wfs = wfs
-            self._psi_wfs = self.apply_phase(wfs)
+            self._psi_wfs = self._apply_phase(wfs)
         else:
             self._psi_wfs = wfs
-            self._u_wfs = self.apply_phase(wfs, inverse=True)
+            self._u_wfs = self._apply_phase(wfs, inverse=True)
 
         # psi, u = self._get_pbc_wfs()
         # self._u_wfs = u
         # self._psi_wfs = psi
 
         # overlap matrix
-        self._M = self.self_overlap_mat()
+        self._M = self._get_self_overlap_mat()
         # band projectors
-        self.set_projectors()
+        self._set_projectors()
 
 
     def _get_pbc_wfs(self):
@@ -841,7 +860,7 @@ class Bloch(wf_array):
         return pbc_psiwfs, pbc_uwfs
     
 
-    def apply_phase(self, wfs, inverse=False):
+    def _apply_phase(self, wfs, inverse=False):
         """
         Change between cell periodic and Bloch wfs by multiplying exp(\pm i k . tau)
 
@@ -871,48 +890,44 @@ class Bloch(wf_array):
     
     # TODO: allow for projectors onto subbands
     # TODO: possibly get rid of nbr by storing boundary states
-    def set_projectors(self):
+    def _set_projectors(self):
         nks = self.k_mesh.nks
         num_nnbrs = self.k_mesh.num_nnbrs
         nnbr_idx_shell = self.k_mesh.nnbr_idx_shell
 
-        if self._nspin == 1:
-            # band projectors
-            self._P = np.einsum("...ni, ...nj -> ...ij", self._u_wfs, self._u_wfs.conj())
-            self._Q = np.eye(self._n_orb) - self._P
+        u_wfs = self.get_states(flatten_spin=True)["Cell periodic"]
+        # u_wfs_spin = self.get_states(flatten_spin=False)["Cell periodic"]
 
-            self._P_nbr = np.zeros((*nks, num_nnbrs, self._n_orb , self._n_orb), dtype=complex)
-            self._Q_nbr = np.zeros((*nks, num_nnbrs, self._n_orb , self._n_orb), dtype=complex)
-            for idx, idx_vec in enumerate(nnbr_idx_shell[0]):  # nearest neighbors
-                # accounting for phase across the BZ boundary
-                states_pbc = np.roll(
-                    self._u_wfs, shift=tuple(-idx_vec), axis=self.k_axes
-                    ) * self.k_mesh.bc_phase[..., idx, np.newaxis,  :]
-                self._P_nbr[..., idx, :, :] = np.einsum(
-                        "...ni, ...nj -> ...ij", states_pbc, states_pbc.conj()
-                        )
-                self._Q_nbr[..., idx, :, :] = np.eye(self._n_orb) - self._P_nbr[..., idx, :, :]
+        # band projectors
+        self._P = np.einsum("...ni, ...nj -> ...ij", u_wfs, u_wfs.conj())
+        self._Q = np.eye(self._n_orb*self._nspin) - self._P
+        
+        self._P_nbr = np.zeros((*nks, num_nnbrs, self._n_orb*self._nspin, self._n_orb*self._nspin), dtype=complex)
+        self._Q_nbr = np.zeros((*nks, num_nnbrs, self._n_orb*self._nspin, self._n_orb*self._nspin), dtype=complex)
+        for idx, idx_vec in enumerate(nnbr_idx_shell[0]):  # nearest neighbors
+            # accounting for phase across the BZ boundary
+            states_pbc = np.roll(
+                u_wfs, shift=tuple(-idx_vec), axis=self.k_axes
+                ) * self.k_mesh.bc_phase[..., idx, np.newaxis,  :]
+            self._P_nbr[..., idx, :, :] = np.einsum(
+                    "...ni, ...nj -> ...ij", states_pbc, states_pbc.conj()
+                    )
+            self._Q_nbr[..., idx, :, :] = np.eye(self._n_orb*self._nspin) - self._P_nbr[..., idx, :, :]
 
-        elif self._nspin == 2:
-            # band projectors
-            self._P = np.einsum("...nil, ...njl -> ...ij", self._u_wfs, self._u_wfs.conj())
-            self._Q = np.eye(self._n_orb) - self._P
-
-            self._P_nbr = np.zeros((*nks, num_nnbrs, self._n_orb, self._n_orb), dtype=complex)
-            self._Q_nbr = np.zeros((*nks, num_nnbrs, self._n_orb, self._n_orb), dtype=complex)
-            for idx, idx_vec in enumerate(nnbr_idx_shell[0]):  # nearest neighbors
-                # accounting for phase across the BZ boundary
-                states_pbc = np.roll(
-                    self._u_wfs, shift=tuple(-idx_vec), axis=self.k_axes
-                    ) * self.k_mesh.bc_phase[..., idx, np.newaxis, :, np.newaxis]
-                self._P_nbr[..., idx, :, :] = np.einsum(
-                        "...nil, ...njl -> ...ij", states_pbc, states_pbc.conj()
-                        )
-                self._Q_nbr[..., idx, :, :] = np.eye(self._n_orb) - self._P_nbr[..., idx, :, :]
+        # elif self._nspin == 2:
+        #     for idx, idx_vec in enumerate(nnbr_idx_shell[0]):  # nearest neighbors
+        #         # accounting for phase across the BZ boundary
+        #         states_pbc = np.roll(
+        #             self._u_wfs, shift=tuple(-idx_vec), axis=self.k_axes
+        #             ) * self.k_mesh.bc_phase[..., idx, np.newaxis, :, np.newaxis]
+        #         self._P_nbr[..., idx, :, :] = np.einsum(
+        #                 "...nil, ...njl -> ...ij", states_pbc, states_pbc.conj()
+        #                 )
+        #         self._Q_nbr[..., idx, :, :] = np.eye(self._n_orb) - self._P_nbr[..., idx, :, :]
         return
     
     # TODO: allow for subbands
-    def self_overlap_mat(self):
+    def _get_self_overlap_mat(self):
         """Compute the overlap matrix of the cell periodic eigenstates. 
         
         Overlap matrix of the form
@@ -932,52 +947,30 @@ class Bloch(wf_array):
         idx_shell = idx_shell[0]
         bc_phase = self.k_mesh.bc_phase
 
-        if self._nspin == 1:
-            # overlap matrix
-            M = np.zeros(
-                (*self.k_mesh.nks, len(idx_shell), self._n_states, self._n_states), dtype=complex
-            )  
-        
-            for idx, idx_vec in enumerate(idx_shell):  # nearest neighbors
-                # introduce phases to states when k+b is across the BZ boundary
-                states_pbc = np.roll(
-                    self._u_wfs, shift=tuple(-idx_vec), axis=[i for i in range(self.k_mesh.dim)]
-                    ) * bc_phase[..., idx, np.newaxis,  :]
-                M[..., idx, :, :] = np.einsum("...mj, ...nj -> ...mn", self._u_wfs.conj(), states_pbc)
+        # overlap matrix
+        M = np.zeros(
+            (*self.k_mesh.nks, len(idx_shell), self._n_states, self._n_states), dtype=complex
+        )  
 
-        elif self._nspin == 2:
-            # overlap matrix
-            M = np.zeros(
-                (*self.k_mesh.nks, len(idx_shell), self._n_states, 2, self._n_states, 2), dtype=complex
-            )  
-        
-            for idx, idx_vec in enumerate(idx_shell):  # nearest neighbors
-                # introduce phases to states when k+b is across the BZ boundary
-                states_pbc = np.roll(
-                    self._u_wfs, shift=tuple(-idx_vec), axis=[i for i in range(self.k_mesh.dim)]
-                    ) * bc_phase[..., idx, np.newaxis,  :, np.newaxis]
-                M[..., idx, :, :, :, :] = np.einsum("...mij, ...nik -> ...mjnk", self._u_wfs.conj(), states_pbc)
+        u_wfs = self.get_states(flatten_spin=True)["Cell periodic"]
+       
+        for idx, idx_vec in enumerate(idx_shell):  # nearest neighbors
+            # introduce phases to states when k+b is across the BZ boundary
+            # if self.model._nspin == 1:
+            states_pbc = np.roll(
+                u_wfs, shift=tuple(-idx_vec), axis=[i for i in range(self.k_mesh.dim)]
+                ) * bc_phase[..., idx, np.newaxis,  :]
+            # u_wfs = self._u_wfs
+            # elif self.model._nspin ==2:
+            #     states_pbc = np.roll(
+            #         self._u_wfs, shift=tuple(-idx_vec), axis=[i for i in range(self.k_mesh.dim)]
+            #         ) * bc_phase[..., idx, np.newaxis,  :, np.newaxis]
+            #     states_pbc = states_pbc.reshape((*states_pbc.shape[:self.k_mesh.dim+1], -1))
+            #     u_wfs = self._u_wfs.reshape((*self._u_wfs.shape[:self.k_mesh.dim+1], -1))
+
+            M[..., idx, :, :] = np.einsum("...mj, ...nj -> ...mn", u_wfs.conj(), states_pbc)
             
         return M
-    
-    #TODO allow for subbands
-    def overlap_mat(self, psi_wfs, tfs, state_idx):
-        """
-        Returns A_{k, n, j} = <psi_{n,k} | t_{j}> where psi are Bloch states and t are
-        the trial wavefunctions.
-
-        Args:
-            psi_wfs (np.array): Bloch eigenstates
-            tfs (np.array): trial wfs
-            state_idx (list): band indices to form overlap matrix with
-
-        Returns:
-            A (np.array): overlap matrix
-        """
-        psi_wfs = np.take(psi_wfs, state_idx, axis=-2)
-        A = np.einsum("...ij, kj -> ...ik", psi_wfs.conj(), tfs)
-        return A
-    
 
     def berry_phase(self, dir=0, state_idx=None, evals=False):
         """
@@ -1204,6 +1197,8 @@ class Bloch(wf_array):
     def chern_num(self, band_idxs=None, dirs=(0,1)):
         if band_idxs is None:
             n_occ = int(self.model._n_orb/2)
+            if self.model._nspin == 2:
+                n_occ *= 2
             band_idxs = np.arange(n_occ) # assume half-filled occupied
 
         berry_flux = self.berry_flux_plaq(state_idx=band_idxs)
@@ -1226,28 +1221,28 @@ class Bloch(wf_array):
 
         return w_b[0] * np.sum(T_kb, axis=-1)
     
-    #TODO allow for subbands
-    def omega_til(self):
-        M = self._M
-        w_b, k_shell, idx_shell = self.k_mesh.get_weights(N_sh=1)
-        w_b = w_b[0]
-        k_shell = k_shell[0]
+    # #TODO allow for subbands
+    # def omega_til(self):
+    #     M = self._M
+    #     w_b, k_shell, idx_shell = self.k_mesh.get_weights(N_sh=1)
+    #     w_b = w_b[0]
+    #     k_shell = k_shell[0]
 
-        nks = M.shape[:-3]
-        Nk = np.prod(nks)
-        k_axes = tuple([i for i in range(len(nks))])
+    #     nks = M.shape[:-3]
+    #     Nk = np.prod(nks)
+    #     k_axes = tuple([i for i in range(len(nks))])
 
-        diag_M = np.diagonal(M, axis1=-1, axis2=-2)
-        log_diag_M_imag = np.log(diag_M).imag
-        abs_diag_M_sq = abs(diag_M) ** 2
+    #     diag_M = np.diagonal(M, axis1=-1, axis2=-2)
+    #     log_diag_M_imag = np.log(diag_M).imag
+    #     abs_diag_M_sq = abs(diag_M) ** 2
 
-        r_n = -(1 / Nk) * w_b * np.sum(log_diag_M_imag, axis=k_axes).T @ k_shell
+    #     r_n = -(1 / Nk) * w_b * np.sum(log_diag_M_imag, axis=k_axes).T @ k_shell
 
-        Omega_tilde = (1 / Nk) * w_b * ( 
-                np.sum((-log_diag_M_imag - k_shell @ r_n.T)**2) + 
-                np.sum(abs(M)**2) - np.sum(abs_diag_M_sq)
-            )
-        return Omega_tilde
+    #     Omega_tilde = (1 / Nk) * w_b * ( 
+    #             np.sum((-log_diag_M_imag - k_shell @ r_n.T)**2) + 
+    #             np.sum(abs(M)**2) - np.sum(abs_diag_M_sq)
+    #         )
+    #     return Omega_tilde
     
 
     def interp_op(self, O_k, k_path, plaq=False):
@@ -1364,9 +1359,6 @@ class Wannier():
         self.tilde_states: Bloch = Bloch(model, *nks)
 
         self.supercell = list(product(*[range(-int((nk-nk%2)/2), int((nk-nk%2)/2)) for nk in nks]))  # used for real space looping of WFs
-
-    def get_tilde_states(self):
-        return self.tilde_states.get_states()
     
     def get_Bloch_Ham(self):
         return self.tilde_states.get_Bloch_Ham() 
@@ -1381,34 +1373,86 @@ class Wannier():
         """
         Args:
             tf_list: list[int | list[tuple]]
-                list of numbers or tuples defining either the integer site
-                of the trial function (delta) or the tuples (site, amplitude)
+                list of tuples defining the orbital and amplitude of the trial function
+                on that orbital. Of the form [ [(orb, amp), ...], ...]. If spin is included,
+                then the form is [ [(orb, spin, amp), ...], ...]
     
         Returns:
-            tfs (num_tf x norb np.ndarray): 2 dimensional array of trial functions
+            tfs: np.ndarray
+                Array of trial functions
         """
 
         # number of trial functions to define
         num_tf = len(tf_list)
 
-        # initialize array containing tfs = "trial functions"
-        tfs = np.zeros([num_tf, self.model._n_orb], dtype=complex)
-        for j, tf in enumerate(tf_list):
-            if isinstance(tf, (int, np.int64)):
-                # trial function only has weight on one site
-                tfs[j, tf] = 1
-            elif isinstance(tf, (list, np.ndarray)):
-                # Must be list of tuples of the form (site, amplitude)
+        if self.model._nspin == 2:
+            tfs = np.zeros([num_tf, self.model._norb, 2], dtype=complex)
+            for j, tf in enumerate(tf_list):
+                assert isinstance(tf, (list, np.ndarray)), "Trial function must be a list of tuples"
+                for orb, spin, amp in tf:
+                    tfs[j, orb, spin] = amp
+                tfs[j] /= np.linalg.norm(tfs[j])
+
+        elif self.model._nspin == 1:
+            # initialize array containing tfs = "trial functions"
+            tfs = np.zeros([num_tf, self.model._n_orb], dtype=complex)
+            for j, tf in enumerate(tf_list):
+                assert isinstance(tf, (list, np.ndarray)), "Trial function must be a list of tuples"
                 for site, amp in tf:
                     tfs[j, site] = amp
-                # normalizing
-                tfs[j, :] /= np.sqrt(sum(abs(tfs[j, :])))
-            else:
-                raise TypeError("tf_list is not of apporpriate type")
-
-        # return numpy array containing trial functions
-        return tfs  # tfs in order[trial funcs, orbitals]
+                tfs[j] /= np.linalg.norm(tfs[j])
+            
+        return tfs 
     
+    def set_trial_wfs(self, tf_list):
+        tfs = self.get_trial_wfs(tf_list)
+        self.trial_wfs = tfs
+        self.n_twfs = tfs.shape[0]
+        return
+
+    def get_tf_ovlp_mat(self, band_idxs, psi_wfs=None):
+        """
+        Returns A_{k, n, j} = <psi_{n,k} | t_{j}> where psi are Bloch states and t are
+        the trial wavefunctions.
+
+        Args:
+            psi_wfs (np.array): Bloch eigenstates
+            tfs (np.array): trial wfs
+            state_idx (list): band indices to form overlap matrix with
+
+        Returns:
+            A (np.array): overlap matrix
+        """
+        if psi_wfs is None:
+            # get Bloch psi_nk energy eigenstates
+            psi_wfs = self.energy_eigstates.get_states()["Bloch"]
+
+        # flatten along spin dimension in case spin is considered
+        n_spin = self.model._nspin
+        dim_k = self.k_mesh.dim
+        num_axes = len(psi_wfs.shape)
+        if num_axes != dim_k + 2 + n_spin - 1:
+            # we have psi_wf defined on a 1D path in dim_k BZ
+            new_shape = (*psi_wfs.shape[:2], -1)
+        else:
+            new_shape = (*psi_wfs.shape[:self.k_mesh.dim+1], -1)
+        psi_wfs = psi_wfs.reshape(*new_shape)
+
+        # only keep band_idxs
+        psi_wfs = np.take(psi_wfs, band_idxs, axis=-2)
+
+        assert hasattr(self, 'trial_wfs'), "Must initialize trial wfs with set_trial_wfs()"
+        trial_wfs = self.trial_wfs
+        # flatten along spin dimension in case spin is considered
+        trial_wfs = trial_wfs.reshape((*trial_wfs.shape[:1], -1))
+
+        A_k = np.einsum("...ij, kj -> ...ik", psi_wfs.conj(), trial_wfs)
+        return A_k
+    
+    def set_tf_ovlp_mat(self, band_idxs):
+        A_k = self.get_tf_ovlp_mat(band_idxs)
+        self.A_k = A_k
+        return
     
     def set_tilde_states(self, tilde_states, cell_periodic=False):
         # set tilde states
@@ -1425,38 +1469,25 @@ class Wannier():
         self.omega_i = spread[0][1]
         self.omega_til = spread[0][2]
         self.centers = spread[1]
-
     
-    def tf_overlap_mat(self, psi_wfs, tfs, state_idx):
-        """
-        Returns A_{k, n, j} = <psi_{n,k} | t_{j}> where psi are Bloch states and t are
-        the trial wavefunctions.
-
-        Args:
-            psi_wfs (np.array): Bloch eigenstates
-            tfs (np.array): trial wfs
-            state_idx (list): band indices to form overlap matrix with
-
-        Returns:
-            A (np.array): overlap matrix
-        """
-        psi_wfs = np.take(psi_wfs, state_idx, axis=-2)
-        A = np.einsum("...ij, kj -> ...ik", psi_wfs.conj(), tfs)
-        return A
-    
-    
-    def get_psi_tilde(self, psi_wfs, tfs, state_idx):
+    def get_psi_tilde(self, psi_wfs, state_idx):
         """
         Performs optimal alignment of psi_wfs with tfs.
         """
-        A = self.tf_overlap_mat(psi_wfs, tfs, state_idx=state_idx)
-        V, _, Wh = np.linalg.svd(A, full_matrices=False)
-        # transpose V@Wh along last two indices
-        psi_tilde = np.swapaxes(V @ Wh, -1, -2) @ psi_wfs[..., state_idx, :] # [*nk, nband, norb]
+        A_k = self.get_tf_ovlp_mat(state_idx, psi_wfs=psi_wfs)
+        V_k, _, Wh_k = np.linalg.svd(A_k, full_matrices=False)
+
+        # flatten spin dimensions
+        psi_wfs = psi_wfs.reshape((*psi_wfs.shape[:self.k_mesh.dim+1], -1))
+        # take only state_idxs
+        psi_wfs = np.take(psi_wfs, state_idx, axis=-2)
+        # optimal alignment
+        psi_tilde = np.einsum("...mn, ...mj -> ...nj", V_k @ Wh_k, psi_wfs) # shape: (*nks, states, orbs*n_spin])
+
         return psi_tilde
     
     
-    def single_shot(self, tf_list: list, band_idxs: list | None = None, tilde=False):
+    def single_shot(self, tf_list: list | None = None, band_idxs: list | None = None, tilde=False):
         """
         Sets the Wannier functions in home unit cell with associated spreads, centers, trial functions 
         and Bloch-like states using the single shot projection method.
@@ -1467,29 +1498,38 @@ class Wannier():
         Returns:
             w_0n (np.array): Wannier functions in home unit cell
         """
-
-        self.tf_list = tf_list
-        self.trial_wfs = self.get_trial_wfs(tf_list)
+        if tf_list is None:
+            assert hasattr(self, 'trial_wfs'), "Must initialize trial wfs with set_trial_wfs()"
+        else:
+            self.set_trial_wfs(tf_list)
 
         if tilde:
+            # projecting back onto tilde states
             if band_idxs is None:  # assume we are projecting onto all tilde states
-                band_idxs = list(range(self.tilde_states._psi_wfs.shape[-2]))
+                band_idxs = list(range(self.tilde_states._n_states))
 
             psi_til_til = self.get_psi_tilde(
-                self.tilde_states._psi_wfs, self.trial_wfs, state_idx=band_idxs
+                self.tilde_states._psi_wfs, state_idx=band_idxs
                 )
             self.set_tilde_states(psi_til_til, cell_periodic=False)
 
-        if not tilde:
-            if band_idxs is None:  # assume we are Wannierizing occupied bands at half-filling
-                n_occ = int(self.energy_eigstates._n_states / 2)  # assuming half filled
+        else:
+            # projecting onto Bloch energy eigenstates
+            if band_idxs is None:  # assume we are Wannierizing occupied bands
+                if self.model._nspin == 1:
+                    n_occ = int(self.energy_eigstates._n_states / 2)  # assuming half filled
+                elif self.model._nspin == 2:
+                    n_occ = int(self.energy_eigstates._n_states / 2)*2  # assuming half filled
+
                 band_idxs = list(range(0, n_occ))
 
-            psi_tilde = self.get_psi_tilde(self.energy_eigstates._psi_wfs, self.trial_wfs, state_idx=band_idxs)
+            psi_tilde = self.get_psi_tilde(self.energy_eigstates._psi_wfs, state_idx=band_idxs)
+            if self.model._nspin == 2:
+                psi_tilde = psi_tilde.reshape((*psi_tilde.shape[:self.k_mesh.dim+1], -1, 2))
             self.tilde_states.set_wfs(psi_tilde, cell_periodic=False)
 
         psi_wfs = self.tilde_states._psi_wfs
-        dim_k = len(psi_wfs.shape[:-2])
+        dim_k = self.k_mesh.dim
         # DFT
         self.WFs = np.fft.ifftn(psi_wfs, axes=[i for i in range(dim_k)], norm=None)
 
@@ -1584,11 +1624,6 @@ class Wannier():
         T_kb = np.zeros((*nks, num_nnbrs), dtype=complex)
         for idx, idx_vec in enumerate(idx_shell[0]):  # nearest neighbors
             T_kb[..., idx] = np.trace(P[..., :, :] @ Q_nbr[..., idx, :, :], axis1=-1, axis2=-2)
-        
-        # T_kb = np.zeros((*nks, num_nnbrs), dtype=complex)
-        # for idx, idx_vec in enumerate(idx_shell[0]):  # nearest neighbors
-        #     Q_nbr = np.roll(Q, shift=tuple(-idx_vec), axis=self.tilde_states.k_axes)
-        #     T_kb[..., idx] = np.trace(P[..., :, :] @ Q_nbr, axis1=-1, axis2=-2)
 
         return (1 / Nk) * w_b[0] * np.sum(T_kb)
     
@@ -1611,19 +1646,6 @@ class Wannier():
 
         return (1 / Nk) * w_b[0] * np.sum(T_kb, axis=-1)
     
-    def get_omega_I_k(self):
-        P = self.tilde_states.get_projector()
-        P_nbr, Q_nbr = self.tilde_states.get_nbr_projector(return_Q=True)
-        nks = self.k_mesh.nks
-        Nk = np.prod(nks)
-        num_nnbrs = self.k_mesh.num_nnbrs
-        w_b, _, idx_shell = self.k_mesh.get_weights(N_sh=1)
-
-        T_kb = np.zeros((*nks, num_nnbrs), dtype=complex)
-        for idx, idx_vec in enumerate(idx_shell[0]):  # nearest neighbors
-            T_kb[..., idx] = np.trace(P[..., :, :] @ Q_nbr[..., idx, :, :], axis1=-1, axis2=-2)
-
-        return (1 / Nk) * w_b[0] * np.sum(T_kb, axis=-1)
     
      ####### Maximally Localized WF #######
 
@@ -1636,13 +1658,18 @@ class Wannier():
         Nk = np.prod(nks)
         n_orb = self.model._n_orb
         n_occ = int(n_orb/2)
+        if self.model._nspin == 2:
+            n_occ *= 2
+
 
         # eigenenergies and eigenstates for inner/outer window
         energies = self.energy_eigstates.get_energies()
         unk_states = self.energy_eigstates.get_states()["Cell periodic"]
-
         # initial subspace
         init_states = self.tilde_states
+
+        if self.model._nspin == 2:
+            unk_states = unk_states.reshape((*unk_states.shape[:self.k_mesh.dim+1], -1))
       
         #### Setting inner/outer energy windows ####
 
@@ -1895,6 +1922,9 @@ class Wannier():
 
         # initial subspace
         init_states = self.tilde_states
+        energy_eigstates = self.energy_eigstates
+        u_wfs = energy_eigstates.get_states(flatten_spin=True)["Cell periodic"]
+        # u_wfs_til = init_states.get_states(flatten_spin=True)["Cell periodic"]
 
         if N_wfs is None:
             # assume number of states in the subspace is number of tilde states 
@@ -1903,7 +1933,7 @@ class Wannier():
         if outer_bands == "occupied":
             outer_bands = list(range(n_occ))
 
-        outer_states = self.energy_eigstates._u_wfs.take(outer_bands, axis=-2)
+        outer_states = u_wfs.take(outer_bands, axis=-2)
 
         # Projector of initial tilde subspace at each k-point
         if inner_bands is None:
@@ -1913,7 +1943,7 @@ class Wannier():
             T_kb = np.einsum('...ij, ...kji -> ...k', P, Q_nbr)
         else:
             N_inner = len(inner_bands)
-            inner_states = self.energy_eigstates._u_wfs.take(inner_bands, axis=-2)
+            inner_states = u_wfs.take(inner_bands, axis=-2)
 
             P_inner = np.swapaxes(inner_states, -1, -2) @ inner_states.conj()
             Q_inner = np.eye(P_inner.shape[-1]) - P_inner
@@ -1937,7 +1967,7 @@ class Wannier():
 
         # manifold from which we borrow states to minimize omega_i
         comp_bands = list(np.setdiff1d(outer_bands, inner_bands))
-        comp_states = self.energy_eigstates._u_wfs[..., comp_bands, :]
+        comp_states = u_wfs.take(comp_bands, axis=-2)
 
         omega_I_prev = (1 / Nk) * w_b[0] * np.sum(T_kb)
 
@@ -1966,7 +1996,7 @@ class Wannier():
                 P_nbr_min = P_nbr_new 
 
             if verbose:
-                Q_nbr_min = np.eye(n_orb) - P_nbr_min 
+                Q_nbr_min = np.eye(n_orb*self.model._nspin) - P_nbr_min 
                 T_kb = np.einsum('...ij, ...kji -> ...k', P_min, Q_nbr_min)
                 omega_I_new = (1 / Nk) * w_b[0] * np.sum(T_kb)
 
@@ -2049,12 +2079,11 @@ class Wannier():
             S_T = (T + np.transpose(T, axes=(0,1,2,4,3)).conj()) / (2j)
             G = 4 * w_b * np.sum(A_R - S_T, axis=-3)
             U = np.einsum("...ij, ...jk -> ...ik", U, self.mat_exp(eta * eps * G))
-
+            
             for idx, idx_vec in enumerate(idx_shell):
                 M[..., idx, :, :] = (
-                    np.transpose(U, axes=(0,1,3,2)).conj()[..., :, :] @  M0[..., idx, :, :] 
-                                    @ np.roll(U, shift=tuple(-idx_vec), axis=(0,1))[..., :, :]
-                                    )
+                    np.swapaxes(U, -1, -2).conj() @  M0[..., idx, :, :] @ np.roll(U, shift=tuple(-idx_vec), axis=(0,1))
+                    )
 
             grad_mag = np.linalg.norm(np.sum(G, axis=(0,1)))
             omega_tilde_new = self._get_Omega_til(M, w_b, k_shell)
@@ -2068,7 +2097,7 @@ class Wannier():
                 print("Omega_tilde minimization has converged within tolerance. Breaking the loop.")
                 return U
             
-            if grad_mag_prev < grad_mag:
+            if grad_mag_prev < grad_mag and i != 0:
                 if verbose:
                     print("Warning: Gradient increasing.")
                 eps *= 0.9
@@ -2117,7 +2146,7 @@ class Wannier():
         U = self.find_min_unitary(
             eps=eps, iter_num=iter_num, verbose=verbose, tol=tol, grad_min=grad_min)
         
-        u_tilde_wfs = self.tilde_states._u_wfs
+        u_tilde_wfs = self.tilde_states.get_states(flatten_spin=True)["Cell periodic"]
         util_max_loc = np.einsum('...ji, ...jm -> ...im', U, u_tilde_wfs)
         
         self.set_tilde_states(util_max_loc, cell_periodic=True)
@@ -2186,12 +2215,22 @@ class Wannier():
 
     def interp_energies(self, k_path, wan_idxs=None, ret_eigvecs=False, u_tilde=None):
         if u_tilde is None:
-            u_tilde = self.get_tilde_states()["Cell periodic"]
+            u_tilde = self.tilde_states.get_states(flatten_spin=True)["Cell periodic"]
         if wan_idxs is not None:
             u_tilde = np.take_along_axis(u_tilde, wan_idxs, axis=-2)
-
         H_k = self.get_Bloch_Ham()
+        if self.model._nspin == 2:
+            new_shape = H_k.shape[:-4] + (2*self.model._norb, 2*self.model._norb)
+            H_k = H_k.reshape(*new_shape)
+
         H_rot_k = u_tilde[..., :, :].conj() @ H_k @ np.transpose(u_tilde[..., : ,:], axes=(0,1,3,2))
+        eigvals, eigvecs = np.linalg.eigh(H_rot_k)
+        eigvecs = np.einsum('...ij, ...ik->...jk', u_tilde, eigvecs)
+        eigvecs = np.swapaxes(eigvecs, -1, -2)
+        # print(eigvecs.shape)
+        # eigvecs = np.einsum('...ij, ...ki-> ...kj', u_tilde, eigvecs)
+        # print(eigvecs.shape)
+        # print(u_tilde.shape, H_k.shape)
 
         k_mesh = self.k_mesh.square_mesh
         k_idx_arr = self.k_mesh.idx_arr
@@ -2203,35 +2242,51 @@ class Wannier():
         # Fourier transform to real space
         H_R = np.zeros((len(supercell), H_rot_k.shape[-1], H_rot_k.shape[-1]), dtype=complex)
         u_R = np.zeros((len(supercell), u_tilde.shape[-2], u_tilde.shape[-1]), dtype=complex)
+        eval_R = np.zeros((len(supercell), eigvals.shape[-1]), dtype=complex)
+        evecs_R = np.zeros((len(supercell), eigvecs.shape[-2], eigvecs.shape[-1]), dtype=complex)
         for idx, (x, y) in enumerate(supercell):
             for k_idx in k_idx_arr:
                 R_vec = np.array([x, y])
                 phase = np.exp(-1j * 2 * np.pi * np.vdot(k_mesh[k_idx], R_vec))
                 H_R[idx, :, :] += H_rot_k[k_idx] * phase / Nk
                 u_R[idx] += u_tilde[k_idx] * phase / Nk
+                eval_R[idx] += eigvals[k_idx] * phase / Nk
+                evecs_R[idx] += eigvecs[k_idx] * phase / Nk
 
         # interpolate to arbitrary k
         H_k_interp = np.zeros((k_path.shape[0], H_R.shape[-1], H_R.shape[-1]), dtype=complex)
         u_k_interp = np.zeros((k_path.shape[0], u_R.shape[-2], u_R.shape[-1]), dtype=complex)
+        eigvals_k_interp = np.zeros((k_path.shape[0], eval_R.shape[-1]), dtype=complex)
+        eigvecs_k_interp = np.zeros((k_path.shape[0], evecs_R.shape[-2], evecs_R.shape[-1]), dtype=complex)
+
         for k_idx, k in enumerate(k_path):
             for idx, (x, y) in enumerate(supercell):
                 R_vec = np.array([x, y])
                 phase = np.exp(1j * 2 * np.pi * np.vdot(k, R_vec))
                 H_k_interp[k_idx] += H_R[idx] * phase
                 u_k_interp[k_idx] += u_R[idx] * phase
+                eigvals_k_interp[k_idx] += eval_R[idx] * phase
+                eigvecs_k_interp[k_idx] += evecs_R[idx] * phase
 
         eigvals, eigvecs = np.linalg.eigh(H_k_interp)
-        eigvecs = np.einsum('...ij, ...ik->...jk', u_k_interp, eigvecs)
-        eigvecs = np.transpose(eigvecs, axes=(0, 2, 1))
+        eigvecs = np.einsum('...ij, ...ik -> ...jk', u_k_interp, eigvecs)
+        eigvecs = np.swapaxes(eigvecs, -1, -2)
+        # normalizing
+        norms = np.linalg.norm(eigvecs, axis=-1, keepdims=True)
+        eigvecs /= norms
+        norms = np.linalg.norm(eigvecs_k_interp, axis=-1, keepdims=True)
+        eigvecs_k_interp /= norms
 
         if ret_eigvecs:
-            return eigvals, eigvecs
+            # return eigvals, eigvecs
+            # return eigvals_k_interp.real, eigvecs
+            return eigvals_k_interp.real, eigvecs_k_interp
         else:
             return eigvals
     
     
     def interp_op(self, O_k, k_path, plaq=False):
-        return self.energy_eigstates.interp_op(O_k, k_path, plaq=plaq)
+        return self.tilde_states.interp_op(O_k, k_path, plaq=plaq)
        
 
     def report(self):
@@ -2251,7 +2306,7 @@ class Wannier():
 
         
     def get_supercell(self, Wan_idx, omit_sites=None):
-        w0 = self.WFs
+        w0 = self.WFs#.reshape((*self.WFs.shape[:self.k_mesh.dim+1], -1))
         center = self.centers[Wan_idx]
         orbs = self.model._orb_vecs
         lat_vecs = self.model._lat_vecs
@@ -2270,8 +2325,8 @@ class Wannier():
             for i, orb in enumerate(orbs):
                 # Extract relevant parameters
                 wf_value = w0[tx, ty, Wan_idx, i]
-                phase = np.arctan2(wf_value.imag, wf_value.real) 
-                wt = np.abs(wf_value) ** 2
+                wt = np.sum(np.abs(wf_value) ** 2)
+                # phase = np.arctan2(wf_value.imag, wf_value.real) 
                 pos = orb[0] * lat_vecs[0] + tx * lat_vecs[0] + orb[1] * lat_vecs[1] + ty * lat_vecs[1]
                 rel_pos = pos - center
                 x, y, rad = pos[0], pos[1], np.sqrt(rel_pos[0] ** 2 + rel_pos[1] ** 2)
@@ -2281,7 +2336,7 @@ class Wannier():
                 positions['all']['ys'].append(y)
                 positions['all']['r'].append(rad)
                 positions['all']['wt'].append(wt)
-                positions['all']['phase'].append(phase)
+                # positions['all']['phase'].append(phase)
 
                 # Handle omit site if applicable
                 if omit_sites is not None and i in omit_sites:
@@ -2289,33 +2344,33 @@ class Wannier():
                     positions['omit']['ys'].append(y)
                     positions['omit']['r'].append(rad)
                     positions['omit']['wt'].append(wt)
-                    positions['omit']['phase'].append(phase)
+                    # positions['omit']['phase'].append(phase)
                 # Separate even and odd index sites
                 if i % 2 == 0:
                     positions['even']['xs'].append(x)
                     positions['even']['ys'].append(y)
                     positions['even']['r'].append(rad)
                     positions['even']['wt'].append(wt)
-                    positions['even']['phase'].append(phase)
+                    # positions['even']['phase'].append(phase)
                     if tx == ty == 0:
                         positions['home even']['xs'].append(x)
                         positions['home even']['ys'].append(y)
                         positions['home even']['r'].append(rad)
                         positions['home even']['wt'].append(wt)
-                        positions['home even']['phase'].append(phase)
+                        # positions['home even']['phase'].append(phase)
 
                 else:
                     positions['odd']['xs'].append(x)
                     positions['odd']['ys'].append(y)
                     positions['odd']['r'].append(rad)
                     positions['odd']['wt'].append(wt)
-                    positions['odd']['phase'].append(phase)
+                    # positions['odd']['phase'].append(phase)
                     if tx == ty == 0:
                         positions['home odd']['xs'].append(x)
                         positions['home odd']['ys'].append(y)
                         positions['home odd']['r'].append(rad)
                         positions['home odd']['wt'].append(wt)
-                        positions['home odd']['phase'].append(phase)
+                        # positions['home odd']['phase'].append(phase)
 
 
         # Convert lists to numpy arrays (batch processing for cleanliness)
@@ -2538,7 +2593,9 @@ class Wannier():
         title=None, save_name=None, show=False, legend=False, pmx=4, pmy=4,
         kwargs_centers={'s': 80, 'marker': '*', 'c': 'g'},
         kwargs_omit={'s': 50, 'marker': 'x', 'c':'k'},
-        kwargs_lat={'s':10, 'marker': 'o', 'c':'k'}, fig=None, ax=None
+        kwargs_lat_ev={'s':10, 'marker': 'o', 'c':'k'}, 
+        kwargs_lat_odd={'s':10, 'marker': 'o', 'c':'k', 'facecolors':'none', 'edgecolors':'k'},
+        fig=None, ax=None
     ):
         lat_vecs = self.model.get_lat_vecs()
         orbs = self.model.get_orb_vecs(Cartesian=False)
@@ -2642,18 +2699,21 @@ class Wannier():
                 xs_odd_out, ys_odd_out = zip(*out_odd)
             else:
                 xs_odd_out, ys_odd_out = [], []  # In case no points are left
-            
-            if 'c' in kwargs_lat.keys():
-                kwargs_lat.pop('c')
-            ax.scatter(xs_ev_out, ys_ev_out, zorder=2, c='k', **kwargs_lat)
-            ax.scatter(xs_odd_out, ys_odd_out, zorder=2, facecolors='none', edgecolors='k', **kwargs_lat)
 
-            ax.scatter(xs_ev_home, ys_ev_home, zorder=2, c='k', **kwargs_lat)
-            ax.scatter(xs_odd_home, ys_odd_home,zorder=2, facecolors='none', edgecolors='k', **kwargs_lat)
+            ax.scatter(xs_ev_home, ys_ev_home, zorder=2, **kwargs_lat_ev)
+            ax.scatter(xs_odd_home, ys_odd_home, zorder=2, **kwargs_lat_odd)
+            
+            if 'c' in kwargs_lat_ev.keys():
+                kwargs_lat_ev.pop('c')
+            if 'c' in kwargs_lat_odd.keys():
+                kwargs_lat_odd.pop('c')
+
+            ax.scatter(xs_ev_out, ys_ev_out, zorder=2, **kwargs_lat_ev)
+            ax.scatter(xs_odd_out, ys_odd_out, zorder=2, **kwargs_lat_odd)
         
         else:
-            ax.scatter(xs_ev, ys_ev, zorder=2, **kwargs_lat)
-            ax.scatter(xs_odd, ys_odd, zorder=2, facecolors='none', edgecolors='k', **kwargs_lat)
+            ax.scatter(xs_ev, ys_ev, zorder=2, **kwargs_lat_ev)
+            ax.scatter(xs_odd, ys_odd, zorder=2, **kwargs_lat_odd)
 
         # draw lines sectioning out home supercell
         if section_home_cell:
@@ -2677,7 +2737,7 @@ class Wannier():
                 else:
                     label=None
                 ax.scatter(
-                    x, y, zorder=1, label=label, s=np.exp(10*self.spread[i])*center_scale, **kwargs_centers)
+                    x, y, zorder=1, label=label, s=np.exp(11*self.spread[i])*center_scale, **kwargs_centers)
             else:
                 center = centers[i]
                 label = "Wannier centers"
