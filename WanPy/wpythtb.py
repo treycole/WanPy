@@ -1184,7 +1184,9 @@ class Bloch(wf_array):
                     continue
                 else:
                     # Area element for the (i, j)-plane
-                    area_element = abs(np.linalg.det(np.array([delta_k[i], delta_k[j]])))
+                    A = np.array([delta_k[i], delta_k[j]])
+                    area_element = np.sqrt(np.linalg.det(A @ A.T))
+                    # area_element = abs(np.linalg.det(np.array([delta_k[i], delta_k[j]])))
                     # Divide flux by the area element to get approx curvature
                     Berry_curv[i, j] = Berry_flux[i, j] / area_element
 
