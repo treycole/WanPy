@@ -703,19 +703,31 @@ class K_mesh():
 
 
 class Bloch(wf_array):
-    def __init__(self, model: Model, *nks):
+    def __init__(self, model: Model, *param_dims):
         """Class for storing and manipulating Bloch like wavefunctions.
         
         Wavefunctions are defined on a semi-full reciprocal space mesh.
         """
-        super().__init__(model, [*nks])
-        assert len(nks) == model._dim_k, "Set of k-points must match model dimensionality"
+        super().__init__(model, param_dims)
+        assert len(param_dims) >= model._dim_k, "Number of dimensions must be >= number of reciprocal space dimensions"
+
+        self.dim_k = model._dim_k
+        nks = param_dims[:self.dim_k]
+        self.nks = nks
+
+        dim_param = len(param_dims) - model._dim_k
+        self.dim_param = dim_param
+        if dim_param != 0:
+            nlam = param_dims[self.dim_k:]
+        else:
+            nlam = None
+        self.nlam = nlam
+        
         self.model: Model = model
         self.k_mesh: K_mesh = K_mesh(model, *nks)
         self._n_orb = model.get_num_orbitals()
         self._nspin = self.model._nspin
         self.set_Bloch_ham()
-
 
     def set_Bloch_ham(self):
         H_k = self.model.get_ham(k_pts=self.k_mesh.flat_mesh) # [Nk, norb, norb]
