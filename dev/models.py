@@ -83,8 +83,6 @@ def kane_mele(onsite, t, soc, rashba):
   # set on-site energies
   ret_model.set_onsite([onsite, -onsite])
 
-
-
   # useful definitions
   sigma_x = np.array([0.,1.,0.,0])
   sigma_y = np.array([0.,0.,1.,0])
