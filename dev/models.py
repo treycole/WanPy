@@ -113,11 +113,15 @@ def kane_mele(onsite, t, soc, rashba):
   return ret_model
 
 
-def fu_kane_mele(t, dt, soc, h=np.array([0,0,0])):
+def fu_kane_mele(t, soc, m, beta):
+    t, soc, m, beta
     # set up Fu-Kane-Mele model
     lat = [[0, 1, 1], [1, 0, 1], [1, 1, 0]]
     orb = [[0, 0, 0], [0.25, 0.25, 0.25]]
     model = Model(3, 3, lat, orb, nspin=2)
+
+    h = m*np.sin(beta)*np.array([1,1,1])
+    dt = m*np.cos(beta)
 
     h0 = [0] + list(h)
     h1 = [0] + list(-h)

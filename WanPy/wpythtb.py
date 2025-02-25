@@ -1,12 +1,168 @@
-import numpy as np
-from itertools import product
+import copy
+from itertools import product, permutations
 from itertools import combinations_with_replacement as comb
+from functools import partial
+import numpy as np
+import scipy.linalg as la
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
 from pythtb import tb_model, wf_array
-import copy
-from functools import partial
-import scipy.linalg as la
+from math import factorial
+
+
+# def get_periodic_H(model, H_flat, k_vals):
+#     orb_vecs = model.get_orb_vecs()
+#     orb_vec_diff = orb_vecs[:, None, :] - orb_vecs[None, :, :]
+#     # orb_phase = np.exp(1j * 2 * np.pi * np.einsum('ijm, ...m->...ij', orb_vec_diff, k_vals))
+#     orb_phase = np.exp(1j * 2 * np.pi * np.matmul(orb_vec_diff, k_vals.T)).transpose(2,0,1)
+#     H_per_flat = H_flat * orb_phase
+#     return H_per_flat
+
+
+# def vel_op_fin_diff(model, H_flat, k_vals, dk, order_eps=1, mode='central'):
+#     """
+#     Compute velocity operators using finite differences.
+    
+#     Parameters:
+#         H_mesh: ndarray of shape (Nk, M, M)
+#             The Hamiltonian on the parameter grid.
+#         dk: list of float
+#             Step sizes in each parameter direction.
+    
+#     Returns:
+#         v_mu_fd: list of ndarray
+#             Velocity operators for each parameter direction.
+#     # """
+
+#     # recip_lat_vecs = model.get_recip_lat_vecs()
+#     # recip_basis = recip_lat_vecs/ np.linalg.norm(recip_lat_vecs, axis=1, keepdims=True)
+#     # g = recip_basis @ recip_basis.T
+#     # sqrt_mtrc = np.sqrt(np.linalg.det(g))
+#     # g_inv = np.linalg.inv(g)
+
+#     # dk = np.einsum("ij, j -> i", g_inv, dk)
+
+#     # assume only k for now
+#     dim_param = model._dim_k # Number of parameters (dimensions)
+#     # assume equal number of mesh points along each dimension
+#     nks = ( int(H_flat.shape[0]**(1/dim_param)),)*dim_param
+
+#     # Switch to periodic gauge H(k) = H(k+G) 
+#     H_flat = get_periodic_H(model, H_flat, k_vals)
+#     H_mesh = H_flat.reshape(*nks, model._norb, model._norb)
+#     v_mu_fd = np.zeros((dim_param, *H_mesh.shape), dtype=complex)
+
+#     # Compute Jacobian
+#     recip_lat_vecs = model.get_recip_lat_vecs()
+#     inv_recip_lat = np.linalg.inv(recip_lat_vecs)
+ 
+#     for mu in range(dim_param):
+#         coeffs, stencil = finite_diff_coeffs(order_eps=order_eps, mode=mode)
+
+#         derivative_sum = np.zeros_like(H_mesh)
+
+#         for s, c in zip(stencil, coeffs):
+#             H_shifted = np.roll(H_mesh, shift=-s, axis=mu)
+#             derivative_sum += c * H_shifted
+
+#         v_mu_fd[mu] = derivative_sum / (dk[mu])
+
+#         # Ensure Hermitian symmetry
+#         v_mu_fd[mu] = 0.5 * (v_mu_fd[mu] + np.conj(v_mu_fd[mu].swapaxes(-1, -2)))
+
+#     return v_mu_fd
+
+
+def finite_diff_coeffs(order_eps, derivative_order=1, mode='central'):
+    """
+    Compute finite difference coefficients using the inverse of the Vandermonde matrix.
+
+    Parameters:
+        stencil_points (array-like): The relative positions of the stencil points (e.g., [-2, -1, 0, 1, 2]).
+        derivative_order (int): Order of the derivative to approximate (default is first derivative).
+
+    Returns:
+        coeffs (numpy array): Finite difference coefficients for the given stencil.
+    """
+    if mode not in ["central", "forward", "backward"]:
+        raise ValueError("Mode must be 'central', 'forward', or 'backward'.")
+    
+    num_points = derivative_order + order_eps  
+
+    if mode == "central":
+        if num_points % 2 == 0:
+            num_points += 1
+        half_span = num_points//2
+        stencil = np.arange(-half_span, half_span + 1)
+
+    elif mode == "forward":
+        stencil = np.arange(0, num_points)
+
+    elif mode == "backward":
+        stencil = np.arange(-num_points+1, 1)
+
+    A = np.vander(stencil, increasing=True).T  # Vandermonde matrix
+    b = np.zeros(num_points)
+    b[derivative_order] = factorial(derivative_order) # Right-hand side for the desired derivative
+
+    coeffs = np.linalg.solve(A, b)  # Solve system Ax = b
+    return coeffs, stencil
+
+
+def compute_d4k_and_d2k(delta_k):
+    """
+    Computes the 4D volume element d^4k and the 2D plaquette areas d^2k for a given set of difference vectors in 4D space.
+
+    Parameters:
+    delta_k (numpy.ndarray): A 4x4 matrix where each row is a 4D difference vector.
+
+    Returns:
+    tuple: (d4k, plaquette_areas) where
+        - d4k is the absolute determinant of delta_k (4D volume element).
+        - plaquette_areas is a dictionary with keys (i, j) and values representing d^2k_{ij}.
+    """
+    # Compute d^4k as the determinant of the 4x4 difference matrix
+    d4k = np.abs(np.linalg.det(delta_k))
+
+    # Function to compute 2D plaquette area in 4D space
+    def compute_plaquette_area(v1, v2):
+        """Compute the 2D plaquette area spanned by two 4D vectors."""
+        area_squared = 0.0
+        # Sum over all unique (m, n) pairs where m < n
+        for m in range(4):
+            for n in range(m + 1, 4):
+                area_squared += (v1[m] * v2[n] - v1[n] * v2[m]) ** 2
+        return np.sqrt(area_squared)
+
+    # Compute all unique plaquette areas
+    plaquette_areas = {}
+    for i in range(4):
+        for j in range(i + 1, 4):
+            plaquette_areas[(i, j)] = compute_plaquette_area(delta_k[i], delta_k[j])
+
+    return d4k, plaquette_areas
+
+
+def levi_civita(n, d):
+    """
+    Constructs the rank-n Levi-Civita tensor in dimension d.
+
+    Parameters:
+    n (int): Rank of the tensor (number of indices).
+    d (int): Dimension (number of possible index values).
+
+    Returns:
+    np.ndarray: Levi-Civita tensor of shape (d, d, ..., d) with n dimensions.
+    """
+    shape = (d,) * n
+    epsilon = np.zeros(shape, dtype=int)
+    # Generate all possible permutations of n indices
+    for perm in permutations(range(d), n):
+        # Compute the sign of the permutation
+        sign = np.linalg.det(np.eye(n)[list(perm)])
+        epsilon[perm] = int(np.sign(sign))  # +1 for even, -1 for odd permutations
+
+    return epsilon
 
 
 class Model(tb_model):
@@ -213,7 +369,13 @@ class Model(tb_model):
             raise ValueError("Invalid spin value.")
 
         # Precompute the lattice vectors for periodic directions
+        # lat_per: lattice vectors in Cartesian coordinates for the periodic directions.
         lat_per = self.get_lat()[self._per, :]  # Shape: (dim_k, dim_k)
+        # recip_lat: full reciprocal lattice vectors (each is a vector)
+        recip_lat = self.get_recip_lat_vecs()
+        # For non-orthogonal lattices, we need the full inverse matrix.
+        inv_recip_lat = np.linalg.inv(recip_lat)
+        recip_lat_mag = [np.linalg.norm(vec) for vec in recip_lat]
 
         # Loop over all hoppings
         for hopping in self._hoppings:
@@ -226,33 +388,35 @@ class Model(tb_model):
             j = hopping[2]
             ind_R = np.array(hopping[3], dtype=float)
 
-            # Compute delta_r for periodic directions
+            # Compute the displacement in real space (including orbital offsets)
             delta_r = ind_R + self._orb[j, :] - self._orb[i, :]  # Shape: (dim_r,)
+            # Keep only the periodic (reduced) components
             delta_r_per = delta_r[self._per]  # Shape: (dim_k,)
-            # Convert delta_r to Cartesian coordinates
-            delta_r_Cart = delta_r_per @ lat_per  # Shape: (dim_k,)
 
             # Compute phase factors for all k-points
             phase = np.exp(1j * 2 * np.pi * k_pts @ delta_r_per)  # Shape: (n_kpts,)
+            # Include Jacobian for non-orthogonal lattices
+            deriv =  1j * 2*np.pi * (inv_recip_lat @ delta_r_per)
 
             # Compute the amplitude for all k-points and components
-            if self._nspin == 2:        
+            if self._nspin == 2:
                 # Compute the amplitude for all k-points and components
-                amp_k = 1j * ( 
-                    delta_r_Cart[:, np.newaxis, np.newaxis, np.newaxis] 
-                    * phase[np.newaxis, :, np.newaxis, np.newaxis] * amp[np.newaxis, np.newaxis, :, :] 
-                 ) # Shape: (dim_k, n_kpts, n_spin, n_spin)
+                amp_k = (
+                    deriv[:, np.newaxis, np.newaxis, np.newaxis] * 
+                    phase[np.newaxis, :, np.newaxis, np.newaxis] * 
+                    amp[np.newaxis, np.newaxis, :, :] 
+                    )
+                  # Shape: (dim_k, n_kpts, n_spin, n_spin)
             else: 
-                amp_k = 1j * amp *  delta_r_Cart[:, np.newaxis] *  phase[np.newaxis, :] # Shape: (dim_k, n_kpts)
-
+                amp_k =  amp * deriv[:, np.newaxis] *  phase[np.newaxis, :] # Shape: (dim_k, n_kpts)
 
             if self._nspin == 1:
                 # Update velocity operator
                 vel[..., i, j] += amp_k 
                 vel[..., j, i] += np.conj(amp_k)
             elif self._nspin == 2:
-                vel[..., i, :, j, :] += amp
-                vel[..., j, :, i, :] += np.swapaxes(amp.conjugate(), -1, -2)
+                vel[..., i, :, j, :] += amp_k
+                vel[..., j, :, i, :] += np.swapaxes(amp_k.conjugate(), -1, -2)
 
         return vel
     
@@ -543,8 +707,9 @@ class Model(tb_model):
 
             if cbar:
                 cbar = fig.colorbar(scat, ticks=[1,0], pad=0.01)
-                cbar.set_ticks([])
-                # cbar.ax.set_yticklabels([r'$\psi_2$', r'$\psi_1$'], size=12)
+                # cbar.set_ticks([])
+                # cbar.ax.set_yticklabels([r'$B$', r'$A$'], size=12)
+                cbar.ax.set_yticklabels([r'$\psi_B$', r'$\psi_A$'], size=12)
 
         elif proj_spin:
             evals, evecs = self.solve_ham(k_vec, return_eigvecs=True)
@@ -1301,6 +1466,7 @@ class Bloch(wf_array):
         nocc = wfs_loop.shape[1]
         # temporary matrices
         wfs_loop = wfs_loop.reshape(wfs_loop.shape[0], wfs_loop.shape[1], -1)
+
         U_wilson = np.eye(nocc, dtype=complex)
 
         ovr_mats = wfs_loop[:-1].conj() @ wfs_loop[1:].swapaxes(-2, -1)
@@ -1350,15 +1516,14 @@ class Bloch(wf_array):
         """
 
         wfs = self.get_states()["Cell periodic"] # u_nk's
-        print(wfs.shape)
         orb_vecs = self.model._orb_vecs
 
         if state_idx is not None:
             wfs = np.take(wfs, state_idx, axis=self.state_axis)
+            # need extra axis for single state
             if isinstance(state_idx, int):
                 wfs = wfs[:self.state_axis-1, np.newaxis, ...]
 
-        print(wfs.shape)
         # size of the mesh
         nks = self.k_mesh.nks
         n_lambda = self.n_lambda
@@ -1387,7 +1552,7 @@ class Bloch(wf_array):
         # loop over unique surfaces ij: (xy, xz, yz, etc.)
         for i in range(dim): 
             for j in range(i + 1, dim):
-                print(i, j)
+                print(i,j)
                 if non_abelian:
                     if self.dim_lam > 0:
                         phases_plane = np.zeros((*nks, *n_lambda, n_states, n_states), dtype=complex)
@@ -1402,8 +1567,11 @@ class Bloch(wf_array):
                 # loop over all plaquettes in this plane
                 for idx in adia_idxes:
                     idx = np.array(idx) # e.g. for 3D [0, 0, 0] ... [3, 0, 0] ... [3, 5, 0] etc.
+
                     if not self.pbc_lam and self.dim_lam > 0:
                         if (np.any(idx[self.k_mesh.dim:] == n_lam_max) and (i == self.k_mesh.dim or j == self.k_mesh.dim) ):
+                            print("here")
+
                             continue
 
                     # define indices of the 4 points of the plaquette, add to the index if in the plane
@@ -1421,6 +1589,8 @@ class Bloch(wf_array):
                     # Extract wavefunctions for the loop
                     wf_use = []
                     for p_idx in plaquette_points:
+                        # correctly finds idx with pbc, assuming pbc on all indices
+                        # print(p_idx)
                         if self.dim_lam > 0:
                             if self.pbc_lam:
                                 mod_idx = np.mod(p_idx, (*nks, *n_lambda))  # Apply PBC to index
@@ -1431,14 +1601,22 @@ class Bloch(wf_array):
                         else:
                             mod_idx = np.mod(p_idx, nks)
 
+                        # print(mod_idx)
+                        # print()
+
                         wf_nbr = np.copy(wfs[tuple(mod_idx)])  # (n_states, n_orb, [opt: n_spin])
+                        # print(wf_nbr.shape)
 
                         diff = p_idx - mod_idx  # Nonzero if crossed BZ boundary 
                         diff_k = diff[:self.k_mesh.dim]
                         crossed_BZ_bndry = np.any(diff_k)
+                        # print(crossed_BZ_bndry)
 
                         if crossed_BZ_bndry:  # Apply boundary condition for u_nk
                             G = np.divide(diff_k, nks)  # G-vector is 1 along dimension crossed
+                            # print(G)
+                            # print(orb_vecs.T)
+                            # print(G @ orb_vecs.T)
                             phase = np.exp(-2j * np.pi * G @ orb_vecs.T) # (n_orb,)
 
                             if self._nspin == 1:
@@ -1451,6 +1629,7 @@ class Bloch(wf_array):
                             wf_nbr = wf_nbr * phase
                         
                         wf_use.append(wf_nbr)
+                        # print()
 
                     wf_use = np.array(wf_use, dtype=complex)
 
@@ -1495,6 +1674,7 @@ class Bloch(wf_array):
             
         else:
             dk = np.array([recip_lat_vecs[k_idx]/(nk) for k_idx, nk in enumerate(nks)])
+            print(dk)
         
         # Occupied states
         Berry_flux = self.berry_flux_plaq(state_idx=state_idx, non_abelian=non_abelian) 
@@ -1509,8 +1689,10 @@ class Bloch(wf_array):
                 else:
                     # Area element for the (i, j)-plane
                     A = np.vstack([dk[i], dk[j]])
-                    # area_element = np.sqrt(np.linalg.det(A @ A.T))
-                    area_element = np.linalg.det(A)
+                    # area_element = np.prod([np.linalg.norm(dk[i]), np.linalg.norm(dk[j])])
+                    area_element = np.sqrt(np.linalg.det(A @ A.T))
+                    print(A)
+                    # area_element = np.linalg.det(A)
                     
                     print(area_element)
        
@@ -2548,22 +2730,22 @@ class Wannier():
 
     def interp_energies(self, k_path, wan_idxs=None, ret_eigvecs=False, u_tilde=None):
         if u_tilde is None:
-            u_tilde = self.tilde_states.get_states(flatten_spin=True)["Cell periodic"]
+            # if self.model._nspin == 2:
+            #     u_tilde = self.tilde_states.get_states(flatten_spin=True)["Cell periodic"]
+            # else:
+            u_tilde = self.tilde_states.get_states(flatten_spin=False)["Cell periodic"]
         if wan_idxs is not None:
             u_tilde = np.take_along_axis(u_tilde, wan_idxs, axis=-2)
+
         H_k = self.get_Bloch_Ham()
         if self.model._nspin == 2:
             new_shape = H_k.shape[:-4] + (2*self.model._norb, 2*self.model._norb)
             H_k = H_k.reshape(*new_shape)
 
-        H_rot_k = u_tilde[..., :, :].conj() @ H_k @ np.transpose(u_tilde[..., : ,:], axes=(0,1,3,2))
+        H_rot_k = u_tilde.conj() @ H_k @ np.swapaxes(u_tilde, -1, -2)
         eigvals, eigvecs = np.linalg.eigh(H_rot_k)
-        eigvecs = np.einsum('...ij, ...ik->...jk', u_tilde, eigvecs)
-        eigvecs = np.swapaxes(eigvecs, -1, -2)
-        # print(eigvecs.shape)
-        # eigvecs = np.einsum('...ij, ...ki-> ...kj', u_tilde, eigvecs)
-        # print(eigvecs.shape)
-        # print(u_tilde.shape, H_k.shape)
+        eigvecs = np.einsum('...ij, ...ik->...kj', u_tilde, eigvecs)
+        # eigvecs = np.swapaxes(eigvecs, -1, -2)
 
         k_mesh = self.k_mesh.square_mesh
         k_idx_arr = self.k_mesh.idx_arr
@@ -2577,12 +2759,12 @@ class Wannier():
         u_R = np.zeros((len(supercell), u_tilde.shape[-2], u_tilde.shape[-1]), dtype=complex)
         eval_R = np.zeros((len(supercell), eigvals.shape[-1]), dtype=complex)
         evecs_R = np.zeros((len(supercell), eigvecs.shape[-2], eigvecs.shape[-1]), dtype=complex)
-        for idx, (x, y) in enumerate(supercell):
+        for idx, r in enumerate(supercell):
             for k_idx in k_idx_arr:
-                R_vec = np.array([x, y])
+                R_vec = np.array([*r])
                 phase = np.exp(-1j * 2 * np.pi * np.vdot(k_mesh[k_idx], R_vec))
-                H_R[idx, :, :] += H_rot_k[k_idx] * phase / Nk
-                u_R[idx] += u_tilde[k_idx] * phase / Nk
+                # H_R[idx, :, :] += H_rot_k[k_idx] * phase / Nk
+                # u_R[idx] += u_tilde[k_idx] * phase / Nk
                 eval_R[idx] += eigvals[k_idx] * phase / Nk
                 evecs_R[idx] += eigvecs[k_idx] * phase / Nk
 
@@ -2593,26 +2775,21 @@ class Wannier():
         eigvecs_k_interp = np.zeros((k_path.shape[0], evecs_R.shape[-2], evecs_R.shape[-1]), dtype=complex)
 
         for k_idx, k in enumerate(k_path):
-            for idx, (x, y) in enumerate(supercell):
-                R_vec = np.array([x, y])
+            for idx, r in enumerate(supercell):
+                R_vec = np.array([*r])
                 phase = np.exp(1j * 2 * np.pi * np.vdot(k, R_vec))
-                H_k_interp[k_idx] += H_R[idx] * phase
-                u_k_interp[k_idx] += u_R[idx] * phase
+                # H_k_interp[k_idx] += H_R[idx] * phase
+                # u_k_interp[k_idx] += u_R[idx] * phase
                 eigvals_k_interp[k_idx] += eval_R[idx] * phase
                 eigvecs_k_interp[k_idx] += evecs_R[idx] * phase
 
-        eigvals, eigvecs = np.linalg.eigh(H_k_interp)
-        eigvecs = np.einsum('...ij, ...ik -> ...jk', u_k_interp, eigvecs)
-        eigvecs = np.swapaxes(eigvecs, -1, -2)
-        # normalizing
-        norms = np.linalg.norm(eigvecs, axis=-1, keepdims=True)
-        eigvecs /= norms
-        norms = np.linalg.norm(eigvecs_k_interp, axis=-1, keepdims=True)
-        eigvecs_k_interp /= norms
+        # eigvals, eigvecs = np.linalg.eigh(H_k_interp)
+        # eigvecs = np.einsum('...ij, ...ik -> ...kj', u_k_interp, eigvecs)
+        # # normalizing
+        # eigvecs /= np.linalg.norm(eigvecs, axis=-1, keepdims=True)
+        eigvecs_k_interp /= np.linalg.norm(eigvecs_k_interp, axis=-1, keepdims=True)
 
         if ret_eigvecs:
-            # return eigvals, eigvecs
-            # return eigvals_k_interp.real, eigvecs
             return eigvals_k_interp.real, eigvecs_k_interp
         else:
             return eigvals
@@ -2927,7 +3104,7 @@ class Wannier():
         kwargs_centers={'s': 80, 'marker': '*', 'c': 'g'},
         kwargs_omit={'s': 50, 'marker': 'x', 'c':'k'},
         kwargs_lat_ev={'s':10, 'marker': 'o', 'c':'k'}, 
-        kwargs_lat_odd={'s':10, 'marker': 'o', 'c':'k', 'facecolors':'none', 'edgecolors':'k'},
+        kwargs_lat_odd={'s':10, 'marker': 'o', 'facecolors':'none', 'edgecolors':'k'},
         fig=None, ax=None
     ):
         lat_vecs = self.model.get_lat_vecs()
