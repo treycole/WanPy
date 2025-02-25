@@ -1,17 +1,178 @@
-import numpy as np
-from itertools import product
+import copy
+from itertools import product, permutations
 from itertools import combinations_with_replacement as comb
+from functools import partial
+import numpy as np
+import scipy.linalg as la
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
 from pythtb import tb_model, wf_array
-import copy
+from math import factorial
+
+
+# def get_periodic_H(model, H_flat, k_vals):
+#     orb_vecs = model.get_orb_vecs()
+#     orb_vec_diff = orb_vecs[:, None, :] - orb_vecs[None, :, :]
+#     # orb_phase = np.exp(1j * 2 * np.pi * np.einsum('ijm, ...m->...ij', orb_vec_diff, k_vals))
+#     orb_phase = np.exp(1j * 2 * np.pi * np.matmul(orb_vec_diff, k_vals.T)).transpose(2,0,1)
+#     H_per_flat = H_flat * orb_phase
+#     return H_per_flat
+
+
+# def vel_op_fin_diff(model, H_flat, k_vals, dk, order_eps=1, mode='central'):
+#     """
+#     Compute velocity operators using finite differences.
+    
+#     Parameters:
+#         H_mesh: ndarray of shape (Nk, M, M)
+#             The Hamiltonian on the parameter grid.
+#         dk: list of float
+#             Step sizes in each parameter direction.
+    
+#     Returns:
+#         v_mu_fd: list of ndarray
+#             Velocity operators for each parameter direction.
+#     # """
+
+#     # recip_lat_vecs = model.get_recip_lat_vecs()
+#     # recip_basis = recip_lat_vecs/ np.linalg.norm(recip_lat_vecs, axis=1, keepdims=True)
+#     # g = recip_basis @ recip_basis.T
+#     # sqrt_mtrc = np.sqrt(np.linalg.det(g))
+#     # g_inv = np.linalg.inv(g)
+
+#     # dk = np.einsum("ij, j -> i", g_inv, dk)
+
+#     # assume only k for now
+#     dim_param = model._dim_k # Number of parameters (dimensions)
+#     # assume equal number of mesh points along each dimension
+#     nks = ( int(H_flat.shape[0]**(1/dim_param)),)*dim_param
+
+#     # Switch to periodic gauge H(k) = H(k+G) 
+#     H_flat = get_periodic_H(model, H_flat, k_vals)
+#     H_mesh = H_flat.reshape(*nks, model._norb, model._norb)
+#     v_mu_fd = np.zeros((dim_param, *H_mesh.shape), dtype=complex)
+
+#     # Compute Jacobian
+#     recip_lat_vecs = model.get_recip_lat_vecs()
+#     inv_recip_lat = np.linalg.inv(recip_lat_vecs)
+ 
+#     for mu in range(dim_param):
+#         coeffs, stencil = finite_diff_coeffs(order_eps=order_eps, mode=mode)
+
+#         derivative_sum = np.zeros_like(H_mesh)
+
+#         for s, c in zip(stencil, coeffs):
+#             H_shifted = np.roll(H_mesh, shift=-s, axis=mu)
+#             derivative_sum += c * H_shifted
+
+#         v_mu_fd[mu] = derivative_sum / (dk[mu])
+
+#         # Ensure Hermitian symmetry
+#         v_mu_fd[mu] = 0.5 * (v_mu_fd[mu] + np.conj(v_mu_fd[mu].swapaxes(-1, -2)))
+
+#     return v_mu_fd
+
+
+def finite_diff_coeffs(order_eps, derivative_order=1, mode='central'):
+    """
+    Compute finite difference coefficients using the inverse of the Vandermonde matrix.
+
+    Parameters:
+        stencil_points (array-like): The relative positions of the stencil points (e.g., [-2, -1, 0, 1, 2]).
+        derivative_order (int): Order of the derivative to approximate (default is first derivative).
+
+    Returns:
+        coeffs (numpy array): Finite difference coefficients for the given stencil.
+    """
+    if mode not in ["central", "forward", "backward"]:
+        raise ValueError("Mode must be 'central', 'forward', or 'backward'.")
+    
+    num_points = derivative_order + order_eps  
+
+    if mode == "central":
+        if num_points % 2 == 0:
+            num_points += 1
+        half_span = num_points//2
+        stencil = np.arange(-half_span, half_span + 1)
+
+    elif mode == "forward":
+        stencil = np.arange(0, num_points)
+
+    elif mode == "backward":
+        stencil = np.arange(-num_points+1, 1)
+
+    A = np.vander(stencil, increasing=True).T  # Vandermonde matrix
+    b = np.zeros(num_points)
+    b[derivative_order] = factorial(derivative_order) # Right-hand side for the desired derivative
+
+    coeffs = np.linalg.solve(A, b)  # Solve system Ax = b
+    return coeffs, stencil
+
+
+def compute_d4k_and_d2k(delta_k):
+    """
+    Computes the 4D volume element d^4k and the 2D plaquette areas d^2k for a given set of difference vectors in 4D space.
+
+    Parameters:
+    delta_k (numpy.ndarray): A 4x4 matrix where each row is a 4D difference vector.
+
+    Returns:
+    tuple: (d4k, plaquette_areas) where
+        - d4k is the absolute determinant of delta_k (4D volume element).
+        - plaquette_areas is a dictionary with keys (i, j) and values representing d^2k_{ij}.
+    """
+    # Compute d^4k as the determinant of the 4x4 difference matrix
+    d4k = np.abs(np.linalg.det(delta_k))
+
+    # Function to compute 2D plaquette area in 4D space
+    def compute_plaquette_area(v1, v2):
+        """Compute the 2D plaquette area spanned by two 4D vectors."""
+        area_squared = 0.0
+        # Sum over all unique (m, n) pairs where m < n
+        for m in range(4):
+            for n in range(m + 1, 4):
+                area_squared += (v1[m] * v2[n] - v1[n] * v2[m]) ** 2
+        return np.sqrt(area_squared)
+
+    # Compute all unique plaquette areas
+    plaquette_areas = {}
+    for i in range(4):
+        for j in range(i + 1, 4):
+            plaquette_areas[(i, j)] = compute_plaquette_area(delta_k[i], delta_k[j])
+
+    return d4k, plaquette_areas
+
+
+def levi_civita(n, d):
+    """
+    Constructs the rank-n Levi-Civita tensor in dimension d.
+
+    Parameters:
+    n (int): Rank of the tensor (number of indices).
+    d (int): Dimension (number of possible index values).
+
+    Returns:
+    np.ndarray: Levi-Civita tensor of shape (d, d, ..., d) with n dimensions.
+    """
+    shape = (d,) * n
+    epsilon = np.zeros(shape, dtype=int)
+    # Generate all possible permutations of n indices
+    for perm in permutations(range(d), n):
+        # Compute the sign of the permutation
+        sign = np.linalg.det(np.eye(n)[list(perm)])
+        epsilon[perm] = int(np.sign(sign))  # +1 for even, -1 for odd permutations
+
+    return epsilon
 
 
 class Model(tb_model):
     def __init__(self, dim_k, dim_r, lat=None, orb=None, per=None, nspin=1):
         super().__init__(dim_k, dim_r, lat=lat, orb=orb, per=per, nspin=nspin)
 
-        self._n_orb = super().get_num_orbitals()
+        self.dim_k = dim_k
+        self.dim_r = dim_r
+        self.n_spin = nspin
+        self.n_orb = super().get_num_orbitals()
         self._lat_vecs = self.get_lat_vecs()
         self._orb_vecs = self.get_orb_vecs(Cartesian=False)
         self._recip_lat_vecs = self.get_recip_lat_vecs()
@@ -31,7 +192,7 @@ class Model(tb_model):
         print("Position of orbitals (reduced coordinates)")
         for idx, pos in enumerate(self._orb_vecs):
             print(f"{idx} ===> {pos}")
-    
+
 
     def get_lat_vecs(self):
         return super().get_lat()
@@ -50,25 +211,35 @@ class Model(tb_model):
     
     def get_recip_vol(self):
         return abs(np.linalg.det(self._recip_lat_vecs))
+                
 
     def get_ham(self, k_pts=None):
-        """Generate Bloch Hamiltonian for an array of k-points.
+        """
+        Generate Bloch Hamiltonian for an array of k-points and varying parameters
 
-        K-point is given in reduced coordinates!"""
+        This Hamiltonian follows tight-binding convention I where the phase factors
+        associated with the orbital positions are included. This means H(k) =\= H(k+G), but 
+        instead H(k) = U H(k+G) U^(dagger). Taking finite differences for partial k_mu H(k)
+        doesn't work in convention I at the boundaries.
+
+        Args:
+            k_pts (array-like, optional): Array of k-points in reduced coordinates
+        """
         
-        k_arr = np.array(k_pts)
+        k_arr = np.array(k_pts) if k_pts is not None else None
+
         if k_pts is not None:
             # if kpnt is just a number then convert it to an array
             if len(k_arr.shape) == 0:
                 k_arr = np.array([k_arr])
-                n_kpts = 1
-            else:
-                n_kpts = k_arr.shape[0]
+            
+            n_kpts = k_arr.shape[0]
+
             # check that k-vector is of corect size
             if k_arr.shape[-1] != self._dim_k:
                 raise Exception("\n\nk-vector of wrong shape!")
         else:
-            if self._dim_k != 0:
+            if self.dim_k != 0:
                 raise Exception("\n\nHave to provide a k-vector!")
 
         if self._nspin == 1:
@@ -122,36 +293,50 @@ class Model(tb_model):
         return ham
     
     
+    def get_periodic_H(self, H_flat, k_vals):
+        """
+        Change to periodic gauge so that H(k+G) = H(k)
+
+        If n_spin = 2, H_flat should only be flat along k and NOT spin
+        """
+        orb_vecs = self.get_orb_vecs()
+        orb_vec_diff = orb_vecs[:, None, :] - orb_vecs[None, :, :]
+        # np.matmul(orb_vec_diff, k_vals.T) = np.einsum('ijm, ...m->...ij', orb_vec_diff, k_vals)).T
+        # np.matmul(orb_vec_diff, k_vals.T) has shape (n_orb, n_orb, N_k)
+        orb_phase = np.exp(1j * 2 * np.pi * np.matmul(orb_vec_diff, k_vals.T)).transpose(2,0,1)
+        H_per_flat = H_flat * orb_phase
+        return H_per_flat
+    
+    
     def solve_ham(self, k_arr, return_eigvecs=False):
-        H_k = self.get_ham(k_arr)
+        """
+        Returns eigenergies and eigenvectors along k_path
 
-        if self._nspin == 1:
-            H_k_use = H_k
-        elif self._nspin == 2:
-            # index mapping is (i, a, j, b) -> (2i + a, 2j + b)
-            new_shape = H_k.shape[:-4] + (2*self._norb, 2*self._norb)
-            H_k_use = H_k.reshape(*new_shape)
+        Returns:
+            eigvals (Nk, n_orb*n_spin)
+            eigvecs (Nk, n_orb*n_spin, n_orb [, n_spin])
+        """
+        H_k = self.get_ham(k_arr) # (Nk, n_orb, n_orb) or (Nk, n_orb, n_spin, n_orb, n_spin)
 
-        if np.max(H_k_use-np.swapaxes(H_k_use.conj(), -1, -2)) > 1e-9:
+        # flatten spin
+        new_shape = (H_k.shape[0],) + (self._nspin*self._norb, self._nspin*self._norb)
+        H_k = H_k.reshape(*new_shape) 
+
+        # H_k is shape (Nk, n_orb*n_spin, n_orb*n_spin)
+
+        if np.max(H_k-np.swapaxes(H_k.conj(), -1, -2)) > 1e-9:
             raise Exception("\n\nHamiltonian matrix is not hermitian?!")
         
         if not return_eigvecs:
-            evals = np.linalg.eigvalsh(H_k_use)
+            evals = np.linalg.eigvalsh(H_k)
             return evals
         else:
-            eigvals, eigvecs = np.linalg.eigh(H_k_use)
-            # args = np.argsort(eigvals, axis=-1)
-            # eigvals = np.take_along_axis(eigvals, args, axis=-1)
-            # eigvecs = np.take_along_axis(eigvecs, args[..., None], axis=-2)
-            eigvecs = np.swapaxes(eigvecs, -1, -2)  # [k, n, orb+spin]
-
-            # norms = np.linalg.norm(eigvecs, axis=2, keepdims=True)
-            # eigvecs /= norms
+            eigvals, eigvecs = np.linalg.eigh(H_k)
+            eigvecs = np.swapaxes(eigvecs, -1, -2)  # (Nk, n_orb*n_spin, n_orb*n_spin)
 
             if self._nspin == 2:
-                # [k, n, orb, spin]
-                new_shape = H_k.shape[:-4] + (self._nsta, self._norb, 2)
-                eigvecs = eigvecs.reshape(*new_shape)
+                new_shape = (H_k.shape[0],) + (self._nsta, self._norb, 2)
+                eigvecs = eigvecs.reshape(*new_shape) # (Nk, n_orb*n_spin, n_orb, n_spin]
 
             return eigvals, eigvecs
     
@@ -165,7 +350,7 @@ class Model(tb_model):
             k_pts: Array of k-points in reduced coordinates, shape (n_kpts, dim_k).
         
         Returns:
-            vel: Velocity operators at each k-point, shape (n_kpts, dim_k, n_orb, n_orb).
+            vel: Velocity operators at each k-point, shape (dim_k, n_kpts, n_orb, n_orb).
         """
         
         k_pts = np.array(k_pts)
@@ -177,14 +362,20 @@ class Model(tb_model):
         n_orb = self._norb
 
         if self._nspin == 1:
-            vel = np.zeros((n_kpts, dim_k, n_orb, n_orb), dtype=complex)
+            vel = np.zeros((dim_k, n_kpts, n_orb, n_orb), dtype=complex)
         elif self._nspin == 2:
-            vel = np.zeros((n_kpts, dim_k, n_orb, 2, n_orb, 2), dtype=complex)
+            vel = np.zeros((dim_k, n_kpts, n_orb, 2, n_orb, 2), dtype=complex)
         else:
             raise ValueError("Invalid spin value.")
 
         # Precompute the lattice vectors for periodic directions
+        # lat_per: lattice vectors in Cartesian coordinates for the periodic directions.
         lat_per = self.get_lat()[self._per, :]  # Shape: (dim_k, dim_k)
+        # recip_lat: full reciprocal lattice vectors (each is a vector)
+        recip_lat = self.get_recip_lat_vecs()
+        # For non-orthogonal lattices, we need the full inverse matrix.
+        inv_recip_lat = np.linalg.inv(recip_lat)
+        recip_lat_mag = [1/np.linalg.norm(vec) for vec in recip_lat]
 
         # Loop over all hoppings
         for hopping in self._hoppings:
@@ -197,74 +388,153 @@ class Model(tb_model):
             j = hopping[2]
             ind_R = np.array(hopping[3], dtype=float)
 
-            # Compute delta_r for periodic directions
-            delta_r = ind_R - self._orb[i, :] + self._orb[j, :]  # Shape: (dim_r,)
+            # Compute the displacement in real space (including orbital offsets)
+            delta_r = ind_R + self._orb[j, :] - self._orb[i, :]  # Shape: (dim_r,)
+            # Keep only the periodic (reduced) components
             delta_r_per = delta_r[self._per]  # Shape: (dim_k,)
-
-            # Convert delta_r to Cartesian coordinates
-            delta_r_Cart = delta_r_per @ lat_per  # Shape: (dim_k,)
+            # delta_r_per_cart = delta_r_per @ lat_per
 
             # Compute phase factors for all k-points
             phase = np.exp(1j * 2 * np.pi * k_pts @ delta_r_per)  # Shape: (n_kpts,)
+            # Include Jacobian for non-orthogonal lattices
+            deriv =  1j * 2*np.pi * (inv_recip_lat @ delta_r_per)
+            # deriv = 1j * 2*np.pi * delta_r_per * recip_lat_mag 
 
             # Compute the amplitude for all k-points and components
-            delta_amp = (-1j) * (-delta_r_Cart)  # Shape: (dim_k,)
-            amp_k = amp * phase[:, np.newaxis] * delta_amp[np.newaxis, :]  # Shape: (n_kpts, dim_k)
+            if self._nspin == 2:
+                # Compute the amplitude for all k-points and components
+                amp_k = (
+                    deriv[:, np.newaxis, np.newaxis, np.newaxis] * 
+                    phase[np.newaxis, :, np.newaxis, np.newaxis] * 
+                    amp[np.newaxis, np.newaxis, :, :] 
+                    )
+                  # Shape: (dim_k, n_kpts, n_spin, n_spin)
+            else: 
+                amp_k =  amp * deriv[:, np.newaxis] *  phase[np.newaxis, :] # Shape: (dim_k, n_kpts)
 
             if self._nspin == 1:
                 # Update velocity operator
-                vel[..., :, i, j] += amp_k 
-                vel[..., :, j, i] += np.conj(amp_k)
+                vel[..., i, j] += amp_k 
+                vel[..., j, i] += np.conj(amp_k)
             elif self._nspin == 2:
-                vel[..., :, i, :, j, :] += amp
-                vel[..., :, j, :, i, :] += amp.T.conjugate()
+                vel[..., i, :, j, :] += amp_k
+                vel[..., j, :, i, :] += np.swapaxes(amp_k.conjugate(), -1, -2)
 
         return vel
     
 
-    def quantum_geom_tens(self, k_pts, occ_idxs=None):
-        dim_k = k_pts.shape[-1]
-        Nk = k_pts.shape[0]
+    # def quantum_geom_tens(self, k_pts, occ_idxs=None):
+    #     dim_k = k_pts.shape[-1]
+    #     Nk = k_pts.shape[0]
         
-        evals, evecs = self.solve_ham(k_pts, return_eigvecs=True)
-        n_eigs = evecs.shape[1]
+    #     evals, evecs = self.solve_ham(k_pts, return_eigvecs=True)
+    #     n_eigs = evecs.shape[1]
 
+    #     if occ_idxs is None:
+    #         n_occ = int(n_eigs/2)
+    #         occ_idxs = list(range(n_occ))
+
+    #     n_occ = len(occ_idxs)
+
+    #     v_k = self.gen_velocity(k_pts) # shape (dim_k, n_kpts, n_orb, n_orb)
+    #     v_k_rot = np.einsum("...ni, a...ij, ...mj -> ...anm", evecs.conj(), v_k, evecs)  # (n_kpts, dim_k, n_orb, n_orb)
+    #     delta_E = evals[..., np.newaxis, :] - evals[..., :, np.newaxis]
+    #     delta_E_sq = delta_E**2
+    #     QGT = np.zeros((Nk, dim_k, dim_k, len(occ_idxs)), dtype=complex)
+
+    #     for n in range(n_occ):
+    #         for m in range(n_eigs):
+    #             if (n in occ_idxs) ^ (m in occ_idxs):
+    #                 for mu in range(dim_k):
+    #                     v_nm_mu = v_k_rot[:, mu, n, m]
+    #                     for nu in range(dim_k):
+    #                         v_mn_nu = v_k_rot[:, nu, m, n]
+    #                         QGT[:, mu, nu, n] += (v_nm_mu * v_mn_nu) / delta_E_sq[:, n, m]
+
+    #     return QGT
+
+    
+    def berry_curvature(self, k_pts, occ_idxs=None, periodic_gauge=False):
+
+        H_flat = self.get_ham(k_pts) # (Nk, n_orb, n_orb) or (Nk, n_orb, n_spin, n_orb, n_spin)
+        v_k = self.gen_velocity(k_pts) # (Nk, dim_k, n_orb, n_orb)
+
+        if periodic_gauge:
+            # should have spin axis separate
+            H_flat = self.get_periodic_H(H_flat, k_pts)
+
+        # flatten spin
+        new_shape = (H_flat.shape[0],) + (self._nspin*self._norb, self._nspin*self._norb)
+        H_flat = H_flat.reshape(*new_shape) 
+
+        # H_flat is shape (Nk, n_orb*n_spin, n_orb*n_spin)
+
+        if np.max(H_flat-np.swapaxes(H_flat.conj(), -1, -2)) > 1e-9:
+            raise Exception("\n\nHamiltonian matrix is not hermitian?!")
+        
+        evals, evecs = np.linalg.eigh(H_flat)
+        # swap for consistent indexing: eigval index is -2, and vals are -1
+        evecs = np.swapaxes(evecs, -1, -2)  # (Nk, n_orb*n_spin, n_orb*n_spin)
+        # TODO: for spinful calculations, should we do this?
+        # new_shape = H_flat.shape[0] + (self._nsta, self._norb, self._nspin) 
+        # evecs = evecs.reshape(*new_shape) # (Nk, n_orb*n_spin, n_orb, n_spin]
+
+        n_eigs = evecs.shape[-2]
+
+        # Identify occupied bands
         if occ_idxs is None:
-            occ_idxs = list(range(int(n_eigs/2)))
+            occ_idxs =  np.arange(n_eigs//2)
+        else:
+            occ_idxs = np.array(occ_idxs)
 
-        v_k = self.gen_velocity(k_pts)
-        v_k_rot = np.einsum("...ni, ...aij, ...mj -> ...anm", evecs.conj(), v_k, evecs)  # (n_kpts, dim_k, n_orb, n_orb)
-        delta_E = evals[..., np.newaxis, :] - evals[..., :, np.newaxis]
-        delta_E_sq = delta_E**2
-        QGT = np.zeros((Nk, n_eigs, dim_k, dim_k), dtype=complex)
+        # Identify conduction bands
+        cond_idxs = np.setdiff1d(np.arange(n_eigs), occ_idxs)  # Identify conduction bands
 
-        for n in range(n_eigs):
-            for m in range(n_eigs):
-                if (n in occ_idxs) ^ (m in occ_idxs):
-                    for mu in range(dim_k):
-                        v_nm_mu = v_k_rot[:, mu, n, m]
-                        for nu in range(dim_k):
-                            v_mn_nu = v_k_rot[:, nu, m, n]
-                            QGT[:, n, mu, nu] += (v_nm_mu * v_mn_nu) / delta_E_sq[:, n, m]
+        # Compute energy denominators in vectorized way
+        delta_E = evals[..., np.newaxis, :] - evals[..., :, np.newaxis] # shape (Nk, n_states, n_states)
+        with np.errstate(divide="ignore", invalid="ignore"):  # Suppress warnings
+            inv_delta_E = np.where(delta_E != 0, 1 / delta_E, 0)
 
-        return QGT
-    
-    
-    def Chern_QGT(self, Omega=None):
-        if Omega is None:
-            nks = (50,) * self._dim_k
-            k_mesh = K_mesh(self, *nks)
-            square_mesh = k_mesh.gen_k_mesh(endpoint=False)
+        # Rotate velocity operators to eigenbasis
+        evecs_conj = evecs.conj()[np.newaxis, :, : :]
+        evecs_T =  evecs.transpose(0,2,1)[ np.newaxis, :, : :]
+        vk_evecT = np.matmul(v_k, evecs_T)
+        v_k_rot = np.matmul(evecs_conj, vk_evecT) # (dim_k, n_kpts, n_orb, n_orb)
 
-            QGT = self.quantum_geom_tens(square_mesh)
-            Omega = -2 * QGT.imag 
+        # Extract relevant submatrices
+        v_occ_cond = v_k_rot[..., occ_idxs, :][..., :, cond_idxs] # shape (dim_k, Nk, n_occ, n_con)
+        v_cond_occ = v_k_rot[..., cond_idxs, :][..., :, occ_idxs] # shape (dim_k, Nk, n_con, n_occ)
+        delta_E_occ_cond = inv_delta_E[:, occ_idxs, :][:, :, cond_idxs] # shape (Nk, n_con, n_occ)
 
-        Nk = Omega.shape[0] 
+        v_occ_cond = v_occ_cond * delta_E_occ_cond
+        v_cond_occ = v_cond_occ * delta_E_occ_cond.swapaxes(-1,-2)
+
+        # Berry curvature shape: (dim_k, dim_k, n_kpts, n_orb, n_orb)
+        b_curv = 1j * ( 
+            np.matmul(v_occ_cond[:, None], v_cond_occ[None, :]) 
+            - np.matmul(v_occ_cond[None, :], v_cond_occ[:, None])
+        )
+
+        return b_curv
+        
+
+    def Chern(self, dirs=(0,1)):
+        """
+        Only works for 2d systems right now
+        """
+        
+        nks = (100,) * self._dim_k
+        k_mesh = K_mesh(self, *nks)
+        flat_mesh = k_mesh.gen_k_mesh(endpoint=False)
+        Omega = self.berry_curvature(flat_mesh)
+
+        Nk = Omega.shape[2] 
         V_BZ = self.get_recip_vol()
         dk_sq = V_BZ / Nk
-        Chern = np.sum(Omega[..., 0, 1], axis=0) * dk_sq / (2 * np.pi)
 
-        return Chern
+        Chern = np.sum(np.trace(Omega[dirs], axis1=-1, axis2=-2)) * dk_sq / (2 * np.pi)
+
+        return Chern.real
         
     
     def make_supercell(
@@ -438,8 +708,10 @@ class Model(tb_model):
                 scat = ax.scatter(k_dist, evals[:, n], c=col[:, n], cmap=cmap, marker='o', s=scat_size, vmin=0, vmax=1, zorder=2)
 
             if cbar:
-                cbar = fig.colorbar(scat, ticks=[1,0])
-                cbar.ax.set_yticklabels([r'$\psi_2$', r'$\psi_1$'], size=12)
+                cbar = fig.colorbar(scat, ticks=[1,0], pad=0.01)
+                # cbar.set_ticks([])
+                # cbar.ax.set_yticklabels([r'$B$', r'$A$'], size=12)
+                cbar.ax.set_yticklabels([r'$\psi_B$', r'$\psi_A$'], size=12)
 
         elif proj_spin:
             evals, evecs = self.solve_ham(k_vec, return_eigvecs=True)
@@ -638,7 +910,11 @@ class K_mesh():
 
         """
         idx_shell = self.nnbr_idx_shell
-        bc_phase = np.ones((*self.nks, idx_shell[0].shape[0], self.model._orb_vecs.shape[0]), dtype=complex)
+        if self.model._nspin == 1:
+            bc_phase = np.ones((*self.nks, idx_shell[0].shape[0], self.model._orb_vecs.shape[0]), dtype=complex)
+        else:
+            bc_phase = np.ones((*self.nks, idx_shell[0].shape[0], self.model._orb_vecs.shape[0], 2), dtype=complex)
+
         for k_idx in self.idx_arr: # each index in k-mesh
             for shell_idx, idx_vec in enumerate(idx_shell[0]):  # vecs connecting neighboring indices
                 k_nbr_idx = np.array(k_idx) + idx_vec # indices for neighboring k
@@ -648,7 +924,14 @@ class K_mesh():
                 # if the translated k-index contains -1 or nk_i+1 then we crossed the BZ boundary
                 cross_bndry = np.any((k_nbr_idx == -1) | np.logical_or.reduce([k_nbr_idx == nk for nk in self.nks]))
                 if cross_bndry:
-                    bc_phase[k_idx][shell_idx]= np.exp(-1j * 2 * np.pi * self.model._orb_vecs @ G.T).T
+                    if self.model._nspin == 1:
+                        bc_phase[k_idx][shell_idx] = np.exp(-1j * 2 * np.pi * self.model._orb_vecs @ G.T).T
+                    else:
+                        bc_phase[k_idx][shell_idx, :] = np.exp(-1j * 2 * np.pi * self.model._orb_vecs @ G.T).T[..., np.newaxis]
+
+        if self.model._nspin == 2:
+            bc_phase = bc_phase.reshape(*bc_phase.shape[:self.dim+1], -1)
+                    
 
         return bc_phase
     
@@ -691,48 +974,223 @@ class K_mesh():
 
 
 class Bloch(wf_array):
-    def __init__(self, model: Model, *nks):
+    def __init__(self, model: Model, *param_dims):
         """Class for storing and manipulating Bloch like wavefunctions.
         
         Wavefunctions are defined on a semi-full reciprocal space mesh.
         """
-        super().__init__(model, [*nks])
-        assert len(nks) == model._dim_k, "Set of k-points must match model dimensionality"
+        super().__init__(model, param_dims)
+        assert len(param_dims) >= model._dim_k, "Number of dimensions must be >= number of reciprocal space dimensions"
+
+        # total parameter space dimension
+        self.dim_param = len(param_dims)
+
+        # reciprocal space dimensions
+        self.dim_k = model._dim_k
+        self.nks = param_dims[:self.dim_k]
+        # stores k-points on a uniform mesh, calculates nearest neighbor points given the model lattice
+        self.k_mesh: K_mesh = K_mesh(model, *self.nks)
+
+        # adiabatic dimension
+        self.dim_lam = self.dim_param - self.dim_k 
+        self.n_lambda = param_dims[self.dim_k:]
+
+        # periodic boundary conditions assumed false unless specified
+        self.pbc_lam = False
+
+        # model attributes
         self.model: Model = model
-        self.k_mesh: K_mesh = K_mesh(model, *nks)
+        self._n_orb = model.get_num_orbitals()
         self._nspin = self.model._nspin
+        self._n_states = self._n_orb * self._nspin
+
+        # axes indexes
+        self.k_axes = tuple(range(self.dim_k))
+        self.lambda_axes = tuple(range(self.dim_k, self.dim_param))
+
+        if self._nspin == 2:
+            self.spin_axis = -1
+            self.orb_axis = -2
+            self.state_axis = -3
+        else:
+            self.spin_axis = None
+            self.orb_axis = -1
+            self.state_axis = -2
+        
+        # wavefunction shapes
+        if self.dim_lam > 0:
+            if self._nspin == 2:
+                self._wf_shape = (*self.nks, *self.n_lambda, self._n_states, self._n_orb, self._nspin)
+            else:
+                self._wf_shape = (*self.nks, *self.n_lambda, self._n_states, self._n_orb)
+        else:
+            if self._nspin == 2:
+                self._wf_shape = (*self.nks, self._n_states, self._n_orb, self._nspin)
+            else:
+                self._wf_shape = (*self.nks, self._n_states, self._n_orb)
+
+            
         self.set_Bloch_ham()
 
+    def get_wf_axes(self):
+        dict_axes = {
+            "wf shape": self._wf_shape,
+            "Number of axes": len(self._wf_shape),
+            "k-axes": self.k_axes, "lambda-axes": self.lambda_axes, "spin-axis": self.spin_axis,
+            "orbital axis": self.orb_axis, "state axis": self.state_axis
+            }
+        return dict_axes
 
-    def set_Bloch_ham(self):
-        H_k = self.model.get_ham(k_pts=self.k_mesh.flat_mesh) # [Nk, norb, norb]
-        # [nk1, nk2, ..., norb, norb]
-        self.H_k = H_k.reshape(*[nk for nk in self.k_mesh.nks], *H_k.shape[1:])
-    
-
-    def solve_on_path(self, k_arr):
-        eigvals, eigvecs = self.model.solve_ham(k_arr, return_eigvecs=True)
-        self.set_wfs(eigvecs)
-        self.energies = eigvals
+    def set_pbc_lam(self):
+        self.pbc_lam = True
 
 
-    def solve_model(self, impose_pbc=True):
+    def set_Bloch_ham(self, lambda_vals=None, model_fxn=None):
+        if lambda_vals is None:
+            H_k = self.model.get_ham(k_pts=self.k_mesh.flat_mesh) # [Nk, norb, norb]
+            # [nk1, nk2, ..., norb, norb]
+            self.H_k = H_k.reshape(*[nk for nk in self.k_mesh.nks], *H_k.shape[1:])
+            return
+        
+        lambda_keys = list(lambda_vals.keys())
+        lambda_ranges = list(lambda_vals.values())
+        lambda_shape = tuple(len(vals) for vals in lambda_ranges)
+        dim_lambda = len(lambda_keys)
+
+        n_kpts = self.k_mesh.Nk
+        n_orb = self._n_orb
+        n_spin = self._n_spin
+        n_states = n_orb*n_spin
+
+        # Initialize storage for wavefunctions and energies
+        if n_spin == 1:
+            H_kl = np.zeros((*lambda_shape, n_kpts, n_states, n_states), dtype=complex)
+        elif n_spin == 2:
+            H_kl = np.zeros((*lambda_shape, n_kpts, n_orb, n_spin, n_orb, n_spin), dtype=complex)
+
+        for idx, param_set in enumerate(np.ndindex(*lambda_shape)):
+            # kwargs for model_fxn with specified parameter values
+            param_dict = {lambda_keys[i]: lambda_ranges[i][param_set] for i in range(dim_lambda)}
+
+            # Generate the model with modified parameters
+            modified_model = model_fxn(**param_dict)
+
+            H_kl[param_set] = modified_model.get_ham(k_pts=self.k_mesh.flat_mesh)
+
+        # Reshape for compatibility with existing Berry curvature methods
+       
+        if self._nspin == 1:
+            new_axes = (dim_lambda,) + tuple(range(dim_lambda)) + tuple(range(dim_lambda+1, dim_lambda+3))
+        else:
+            new_axes = (dim_lambda,) + tuple(range(dim_lambda))+tuple(range(dim_lambda+1, dim_lambda+5))
+        H_kl = np.transpose(H_kl, axes=new_axes)
+
+        if self._nspin == 1:
+            new_shape = (*self.k_mesh.nks, *lambda_shape, n_states, n_states)
+        else:
+            new_shape = (*self.k_mesh.nks, *lambda_shape, n_states, n_orb, n_spin)
+        H_kl = H_kl.reshape(new_shape)
+        
+        self.H_k = H_kl
+
+
+    def solve_model(self, model_fxn=None, lambda_vals=None):
         """
         Solves for the eigenstates of the Bloch Hamiltonian defined by the model over a semi-full 
         k-mesh, e.g. in 3D reduced coordinates {k = [kx, ky, kz] | k_i in [0, 1)}.
+
+        Args:
+            model_fxn (function, optional):
+                A function that returns a model given a set of parameters.
+            param_vals (dict, optional):
+                Dictionary of parameter values for adiabatic evoltuion. Each key corresponds to
+                a varying parameter and the values are arrays
         """
 
-        eigvals, eigvecs = self.model.solve_ham(self.k_mesh.flat_mesh, return_eigvecs=True)
-        eigvecs = eigvecs.reshape(*[nk for nk in self.k_mesh.nks], *eigvecs.shape[1:])
-        eigvals = eigvals.reshape(*[nk for nk in self.k_mesh.nks], *eigvals.shape[1:])
-        self.set_wfs(eigvecs, impose_pbc=impose_pbc)
-        self.energies = eigvals
+        if lambda_vals is None:
+            # compute eigenstates and eigenenergies on full k_mesh
+            eigvals, eigvecs = self.model.solve_ham(self.k_mesh.flat_mesh, return_eigvecs=True)
+            eigvecs = eigvecs.reshape(*self.k_mesh.nks, *eigvecs.shape[1:])
+            eigvals = eigvals.reshape(*self.k_mesh.nks, *eigvals.shape[1:])
+            self.set_wfs(eigvecs)
+            self.energies = eigvals
+            return
 
-    # Retrievers 
-    def get_states(self):
+        lambda_keys = list(lambda_vals.keys())
+        lambda_ranges = list(lambda_vals.values())
+        lambda_shape = tuple(len(vals) for vals in lambda_ranges)
+        dim_lambda = len(lambda_keys)
+        
+        n_kpts = self.k_mesh.Nk
+        n_orb = self.model.get_num_orbitals()
+        n_spin = self.model.n_spin
+        n_states = n_orb*n_spin
+
+        # Initialize storage for wavefunctions and energies
+        if n_spin == 1:
+            u_wfs = np.zeros((*lambda_shape, n_kpts, n_states, n_states), dtype=complex)
+        elif n_spin == 2:
+            u_wfs = np.zeros((*lambda_shape, n_kpts, n_states, n_orb, n_spin), dtype=complex)
+
+        energies = np.zeros((*lambda_shape, n_kpts, n_states))
+
+        for idx, param_set in enumerate(np.ndindex(*lambda_shape)):
+            param_dict = {lambda_keys[i]: lambda_ranges[i][param_set] for i in range(dim_lambda)}
+
+            # Generate the model with modified parameters
+            modified_model = model_fxn(**param_dict)
+             
+            # Solve for eigenstates
+            eigvals, eigvecs = modified_model.solve_ham(self.k_mesh.flat_mesh, return_eigvecs=True)
+
+            # Store results
+            energies[param_set] = eigvals
+            u_wfs[param_set] = eigvecs
+
+        # Reshape for compatibility with existing Berry curvature methods
+        new_axes = (dim_lambda,) + tuple(range(dim_lambda))+(dim_lambda+1, )
+        energies = np.transpose(energies, axes=new_axes)
+        if self._nspin == 1:
+            new_axes = (dim_lambda,) + tuple(range(dim_lambda))+tuple(range(dim_lambda+1, dim_lambda+3))
+        else:
+            new_axes = (dim_lambda,) + tuple(range(dim_lambda))+tuple(range(dim_lambda+1, dim_lambda+4))
+        u_wfs = np.transpose(u_wfs, axes=new_axes)
+
+        if self._nspin == 1:
+            new_shape = (*self.k_mesh.nks, *lambda_shape, n_states, n_states)
+        else:
+            new_shape = (*self.k_mesh.nks, *lambda_shape, n_states, n_orb, n_spin)
+        u_wfs = u_wfs.reshape(new_shape)
+        energies = energies.reshape((*self.k_mesh.nks, *lambda_shape, n_states))
+
+        self.set_wfs(u_wfs, cell_periodic=True)
+        self.energies = energies
+
+    def solve_on_path(self, k_arr):
+        """
+        Solves on model passed when initialized. Not suitable for 
+        adiabatic parameters in the model beyond k.
+        """
+        eigvals, eigvecs = self.model.solve_ham(k_arr, return_eigvecs=True)
+        self.set_wfs(eigvecs)
+        self.energies = eigvals
+        
+
+    ###### Retrievers  #######
+
+    def get_states(self, flatten_spin=False):
         """Returns dictionary containing Bloch and cell-periodic eigenstates."""
         assert hasattr(self, "_psi_wfs"), "Need to call `solve_model` or `set_wfs` to initialize Bloch states"
-        return {"Bloch": self._psi_wfs, "Cell periodic": self._u_wfs}
+        psi_wfs = self._psi_wfs
+        u_wfs = self._u_wfs
+
+        if flatten_spin:
+            # shape is [nk1, ..., nkd, [n_lambda,] n_state, n_orb, n_spin], flatten last two axes
+            psi_wfs = psi_wfs.reshape((*psi_wfs.shape[:-2], -1))
+            u_wfs = u_wfs.reshape((*u_wfs.shape[:-2], -1))
+
+        return {"Bloch": psi_wfs,  "Cell periodic": u_wfs}
+    
     
     def get_projector(self, return_Q = False):
         assert hasattr(self, "_P"), "Need to call `solve_model` or `set_wfs` to initialize Bloch states"
@@ -764,8 +1222,7 @@ class Bloch(wf_array):
         assert hasattr(self, "_M"), "Need to call `solve_model` or `set_wfs` to initialize overlap matrix"
         return self._M
     
-
-    def set_wfs(self, wfs, cell_periodic: bool=True, impose_pbc=True):
+    def set_wfs(self, wfs, cell_periodic: bool=True):
         """
         Sets the Bloch and cell-periodic eigenstates as class attributes.
 
@@ -775,33 +1232,19 @@ class Bloch(wf_array):
                 to nks passed during class instantiation. The mesh is assumed to exlude the
                 endpoints, e.g. in reduced coordinates {k = [kx, ky, kz] | k_i in [0, 1)}. 
         """
-        # storing axes information 
-        self.k_axes = tuple([i for i in range(self.k_mesh.dim)])
-        self.state_axis = self.k_mesh.dim 
-        self.orb_axis = self.k_mesh.dim + 1
-
-        self._n_states = wfs.shape[self.state_axis]
-        self._n_orb = wfs.shape[self.orb_axis]
-
-        if self._nspin == 2:
-            # shape is expected to be [..., nstate, norb, nspin]
-            self.spin_axis = self.k_mesh.dim + 2  # may not exist
        
         if cell_periodic:
             self._u_wfs = wfs
-            self._psi_wfs = self.apply_phase(wfs)
+            self._psi_wfs = self._apply_phase(wfs)
         else:
             self._psi_wfs = wfs
-            self._u_wfs = self.apply_phase(wfs, inverse=True)
+            self._u_wfs = self._apply_phase(wfs, inverse=True)
 
-        # psi, u = self._get_pbc_wfs()
-        # self._u_wfs = u
-        # self._psi_wfs = psi
-
-        # overlap matrix
-        self._M = self.self_overlap_mat()
-        # band projectors
-        self.set_projectors()
+        if self._nspin != 2:
+            # overlap matrix
+            self._M = self._get_self_overlap_mat()
+            # band projectors
+            self._set_projectors()
 
 
     def _get_pbc_wfs(self):
@@ -840,8 +1283,8 @@ class Bloch(wf_array):
 
         return pbc_psiwfs, pbc_uwfs
     
-
-    def apply_phase(self, wfs, inverse=False):
+    # Works with and without spin and lambda
+    def _apply_phase(self, wfs, inverse=False):
         """
         Change between cell periodic and Bloch wfs by multiplying exp(\pm i k . tau)
 
@@ -853,17 +1296,28 @@ class Bloch(wf_array):
             wfs with orbitals multiplied by phase factor
 
         """
-        phases = self.k_mesh.get_orb_phases(inverse=inverse).reshape(*self.k_mesh.nks, self._n_orb)
+        lam = -1 if inverse else 1  # overall minus if getting cell periodic from Bloch
+        per_dir = list(range(self.k_mesh.flat_mesh.shape[-1]))  # list of periodic dimensions
+        # slice second dimension to only keep only periodic dimensions in orb
+        per_orb = self.model._orb_vecs[:, per_dir]
+
+        # compute a list of phase factors: exp(pm i k . tau) of shape [k_val, orbital]
+        phases = np.exp(lam * 1j * 2 * np.pi * per_orb @ self.k_mesh.flat_mesh.T, dtype=complex).T
+        phases = phases.reshape(*self.k_mesh.nks, self._n_orb)
+
+        if hasattr(self, "n_lambda") and self.n_lambda:
+            phases = phases[..., np.newaxis, :]
+
+        wfs = wfs.reshape(*self._wf_shape)
         
         # broadcasting to match dimensions
         if self._nspin == 1:
             # reshape to have each k-dimension as an axis
-            wfs = wfs.reshape(*self.k_mesh.nks, self._n_states, self._n_orb)
+            # wfs = wfs.reshape(*self.k_mesh.nks, self._n_states, self._n_orb)
             # newaxis along state dimension
             phases = phases[..., np.newaxis, :]
         elif self._nspin == 2:
             # reshape to have each k-dimension as an axis
-            wfs = wfs.reshape(*self.k_mesh.nks, self._n_states, self._n_orb, self._nspin)
             # newaxis along state and spin dimension
             phases = phases[..., np.newaxis, :, np.newaxis]
 
@@ -871,48 +1325,40 @@ class Bloch(wf_array):
     
     # TODO: allow for projectors onto subbands
     # TODO: possibly get rid of nbr by storing boundary states
-    def set_projectors(self):
-        nks = self.k_mesh.nks
+    def _set_projectors(self):
         num_nnbrs = self.k_mesh.num_nnbrs
         nnbr_idx_shell = self.k_mesh.nnbr_idx_shell
 
-        if self._nspin == 1:
-            # band projectors
-            self._P = np.einsum("...ni, ...nj -> ...ij", self._u_wfs, self._u_wfs.conj())
-            self._Q = np.eye(self._n_orb) - self._P
+        if self._nspin == 2:
+            u_wfs = self.get_states(flatten_spin=True)["Cell periodic"]
+        else:
+            u_wfs = self.get_states()["Cell periodic"]
 
-            self._P_nbr = np.zeros((*nks, num_nnbrs, self._n_orb , self._n_orb), dtype=complex)
-            self._Q_nbr = np.zeros((*nks, num_nnbrs, self._n_orb , self._n_orb), dtype=complex)
-            for idx, idx_vec in enumerate(nnbr_idx_shell[0]):  # nearest neighbors
-                # accounting for phase across the BZ boundary
-                states_pbc = np.roll(
-                    self._u_wfs, shift=tuple(-idx_vec), axis=self.k_axes
-                    ) * self.k_mesh.bc_phase[..., idx, np.newaxis,  :]
-                self._P_nbr[..., idx, :, :] = np.einsum(
-                        "...ni, ...nj -> ...ij", states_pbc, states_pbc.conj()
-                        )
-                self._Q_nbr[..., idx, :, :] = np.eye(self._n_orb) - self._P_nbr[..., idx, :, :]
+        # band projectors
+        self._P = np.einsum("...ni, ...nj -> ...ij", u_wfs, u_wfs.conj())
+        self._Q = np.eye(self._n_orb*self._nspin) - self._P
 
-        elif self._nspin == 2:
-            # band projectors
-            self._P = np.einsum("...nil, ...njl -> ...ij", self._u_wfs, self._u_wfs.conj())
-            self._Q = np.eye(self._n_orb) - self._P
+        self._P_nbr = np.zeros((self._P.shape[:-2] + (num_nnbrs,) + self._P.shape[-2:]), dtype=complex)
+        self._Q_nbr = np.zeros_like(self._P_nbr)
+        
+        # self._P_nbr = np.zeros((*nks, num_nnbrs, self._n_orb*self._nspin, self._n_orb*self._nspin), dtype=complex)
+        # self._Q_nbr = np.zeros((*nks, num_nnbrs, self._n_orb*self._nspin, self._n_orb*self._nspin), dtype=complex)
 
-            self._P_nbr = np.zeros((*nks, num_nnbrs, self._n_orb, self._n_orb), dtype=complex)
-            self._Q_nbr = np.zeros((*nks, num_nnbrs, self._n_orb, self._n_orb), dtype=complex)
-            for idx, idx_vec in enumerate(nnbr_idx_shell[0]):  # nearest neighbors
-                # accounting for phase across the BZ boundary
-                states_pbc = np.roll(
-                    self._u_wfs, shift=tuple(-idx_vec), axis=self.k_axes
-                    ) * self.k_mesh.bc_phase[..., idx, np.newaxis, :, np.newaxis]
-                self._P_nbr[..., idx, :, :] = np.einsum(
-                        "...nil, ...njl -> ...ij", states_pbc, states_pbc.conj()
-                        )
-                self._Q_nbr[..., idx, :, :] = np.eye(self._n_orb) - self._P_nbr[..., idx, :, :]
+        #TODO need shell to iterate over extra lambda dims also, shift accordingly
+        for idx, idx_vec in enumerate(nnbr_idx_shell[0]):  # nearest neighbors
+            # accounting for phase across the BZ boundary
+            states_pbc = np.roll(
+                u_wfs, shift=tuple(-idx_vec), axis=self.k_axes
+                ) * self.k_mesh.bc_phase[..., idx, np.newaxis,  :]
+            self._P_nbr[..., idx, :, :] = np.einsum(
+                    "...ni, ...nj -> ...ij", states_pbc, states_pbc.conj()
+                    )
+            self._Q_nbr[..., idx, :, :] = np.eye(self._n_orb*self._nspin) - self._P_nbr[..., idx, :, :]
+
         return
     
     # TODO: allow for subbands
-    def self_overlap_mat(self):
+    def _get_self_overlap_mat(self):
         """Compute the overlap matrix of the cell periodic eigenstates. 
         
         Overlap matrix of the form
@@ -932,52 +1378,25 @@ class Bloch(wf_array):
         idx_shell = idx_shell[0]
         bc_phase = self.k_mesh.bc_phase
 
-        if self._nspin == 1:
-            # overlap matrix
-            M = np.zeros(
-                (*self.k_mesh.nks, len(idx_shell), self._n_states, self._n_states), dtype=complex
-            )  
-        
-            for idx, idx_vec in enumerate(idx_shell):  # nearest neighbors
-                # introduce phases to states when k+b is across the BZ boundary
-                states_pbc = np.roll(
-                    self._u_wfs, shift=tuple(-idx_vec), axis=[i for i in range(self.k_mesh.dim)]
-                    ) * bc_phase[..., idx, np.newaxis,  :]
-                M[..., idx, :, :] = np.einsum("...mj, ...nj -> ...mn", self._u_wfs.conj(), states_pbc)
+        # overlap matrix
+        M = np.zeros(
+            (*self.k_mesh.nks, len(idx_shell), self._n_states, self._n_states), dtype=complex
+        )  
 
-        elif self._nspin == 2:
-            # overlap matrix
-            M = np.zeros(
-                (*self.k_mesh.nks, len(idx_shell), self._n_states, 2, self._n_states, 2), dtype=complex
-            )  
-        
-            for idx, idx_vec in enumerate(idx_shell):  # nearest neighbors
-                # introduce phases to states when k+b is across the BZ boundary
-                states_pbc = np.roll(
-                    self._u_wfs, shift=tuple(-idx_vec), axis=[i for i in range(self.k_mesh.dim)]
-                    ) * bc_phase[..., idx, np.newaxis,  :, np.newaxis]
-                M[..., idx, :, :, :, :] = np.einsum("...mij, ...nik -> ...mjnk", self._u_wfs.conj(), states_pbc)
+        if self._nspin == 2:
+            u_wfs = self.get_states(flatten_spin=True)["Cell periodic"]
+        else:
+            u_wfs = self.get_states()["Cell periodic"]
+
+        print(u_wfs.shape)       
+        for idx, idx_vec in enumerate(idx_shell):  # nearest neighbors
+            # introduce phases to states when k+b is across the BZ boundary
+            states_pbc = np.roll(
+                u_wfs, shift=tuple(-idx_vec), axis=[i for i in range(self.k_mesh.dim)]
+                ) * bc_phase[..., idx, np.newaxis,  :]
+            M[..., idx, :, :] = np.einsum("...mj, ...nj -> ...mn", u_wfs.conj(), states_pbc)
             
         return M
-    
-    #TODO allow for subbands
-    def overlap_mat(self, psi_wfs, tfs, state_idx):
-        """
-        Returns A_{k, n, j} = <psi_{n,k} | t_{j}> where psi are Bloch states and t are
-        the trial wavefunctions.
-
-        Args:
-            psi_wfs (np.array): Bloch eigenstates
-            tfs (np.array): trial wfs
-            state_idx (list): band indices to form overlap matrix with
-
-        Returns:
-            A (np.array): overlap matrix
-        """
-        psi_wfs = np.take(psi_wfs, state_idx, axis=-2)
-        A = np.einsum("...ij, kj -> ...ik", psi_wfs.conj(), tfs)
-        return A
-    
 
     def berry_phase(self, dir=0, state_idx=None, evals=False):
         """
@@ -1027,7 +1446,7 @@ class Bloch(wf_array):
 
         return phase        
 
-
+    # works in all cases
     def wilson_loop(self, wfs_loop, evals=False):
         """Compute Wilson loop unitary matrix and its eigenvalues for multiband Berry phases.
         
@@ -1035,8 +1454,8 @@ class Bloch(wf_array):
         
         Args:
             wfs_loop (np.ndarray):
-                Has format [kpnt, band, orbital, spin] and kpnt has to be one dimensional.
-                Assumes that first and last k-point are the same. Therefore if
+                Has format [loop_idx, band, orbital, spin] and loop has to be one dimensional.
+                Assumes that first and last loop-point are the same. Therefore if
                 there are n wavefunctions in total, will calculate phase along n-1
                 links only!  
             berry_evals (bool):
@@ -1048,46 +1467,48 @@ class Bloch(wf_array):
         # number of occupied states
         nocc = wfs_loop.shape[1]
         # temporary matrices
-        U_wilson = np.identity(nocc, dtype=complex)
-        ovr = np.zeros([nocc, nocc], dtype=complex)
+        wfs_loop = wfs_loop.reshape(wfs_loop.shape[0], wfs_loop.shape[1], -1)
 
-        # go over all pairs of k-points, assuming that last point is overcounted!
-        for i in range(wfs_loop.shape[0]-1):
-            # generate overlap matrix, go over all bands
-            for j in range(nocc):
-                for k in range(nocc):
-                    ovr[j,k] = np.vdot(wfs_loop[i,j].flatten(), wfs_loop[i+1,k].flatten())
+        U_wilson = np.eye(nocc, dtype=complex)
 
-            # find phases of individual eigenvalues
-            if evals:
-                # cleanup matrices with SVD then take product
-                matU, _, matV = np.linalg.svd(ovr)
-                U_wilson = np.dot(U_wilson, np.dot(matU, matV))
-            # only find Berry phase
-            else:
-                # multiply overlap matrices
-                U_wilson = np.dot(U_wilson, ovr)
+        ovr_mats = wfs_loop[:-1].conj() @ wfs_loop[1:].swapaxes(-2, -1)
+
+        for ovr in ovr_mats:
+            V, _, Wd = np.linalg.svd(ovr, full_matrices=False)
+
+            # update Wilson loop eigenvalues
+            U_wilson @= V @ Wd
+
+
+        # # go over all pairs of k-points, assuming that last point is overcounted!
+        # for i in range(wfs_loop.shape[0]-1):
+        #     # generate overlap matrix, go over all bands
+        #     ovr = wfs_loop[i].conj() @ wfs_loop[i+1].T
+    
+        #     V, _, Wd = np.linalg.svd(ovr, full_matrices=False)
+
+        #     # update Wilson loop eigenvalues
+        #     U_wilson @= V @ Wd
        
         # calculate phases of all eigenvalues
         if evals:
             evals = np.linalg.eigvals(U_wilson) # Wilson loop eigenvalues
-            eval_pha = -np.angle(evals) # Multiband  Berrry phases
-            eval_pha = np.sort(eval_pha) 
+            eval_pha = -np.angle(evals) # Multiband  Berrry phases 
             return U_wilson, eval_pha
         else:
             return U_wilson
         
-        
+    # works in all cases
     def berry_loop(self, wfs_loop, evals=False):
         U_wilson = self.wilson_loop(wfs_loop, evals=evals)
 
         if evals:
             return U_wilson[1]
         else:
-            return -np.angle(np.linalg.det(U_wilson)) # total Berry phase
-         
+            return -np.angle(np.linalg.det(U_wilson)) # total Berry phase        
+
     
-    def berry_flux_plaq(self, state_idx=None, non_Abelian=False):
+    def berry_flux_plaq(self, state_idx=None, non_abelian=False):
         """Compute fluxes on a two-dimensional plane of states.
         
         For a given set of states, returns the band summed Berry curvature
@@ -1101,31 +1522,59 @@ class Bloch(wf_array):
 
         if state_idx is not None:
             wfs = np.take(wfs, state_idx, axis=self.state_axis)
+            # need extra axis for single state
             if isinstance(state_idx, int):
                 wfs = wfs[:self.state_axis-1, np.newaxis, ...]
 
         # size of the mesh
         nks = self.k_mesh.nks
-        dim = self.k_mesh.dim
+        n_lambda = self.n_lambda
+        dim = self.dim_param
         n_states = wfs.shape[self.state_axis]
 
         # store flux through each plaquette of the mesh
-        if non_Abelian:
-            Berry_flux = np.zeros((dim, dim, *nks, n_states, n_states), dtype=float)
+        if non_abelian:
+            if self.dim_lam > 0:
+                Berry_flux = np.zeros((dim, dim, *nks, *n_lambda, n_states, n_states), dtype=complex)
+            else:
+                Berry_flux = np.zeros((dim, dim, *nks, n_states, n_states), dtype=complex)
         else:
-            Berry_flux = np.zeros((dim, dim, *nks), dtype=float)
+            if self.dim_lam > 0:
+                Berry_flux = np.zeros((dim, dim, *nks, *n_lambda), dtype=complex)
+            else:
+                Berry_flux = np.zeros((dim, dim, *nks), dtype=complex)
+
+        if self.dim_lam > 0:
+            adia_idxes = list(np.ndindex(*nks, *n_lambda))
+        else:
+            adia_idxes = list(np.ndindex(*nks))
+
+        n_lam_max = [n-1 for n in n_lambda]
 
         # loop over unique surfaces ij: (xy, xz, yz, etc.)
         for i in range(dim): 
             for j in range(i + 1, dim):
-                if non_Abelian:
-                    phases_plane = np.zeros((*nks, n_states, n_states), dtype=float)
+                print(i,j)
+                if non_abelian:
+                    if self.dim_lam > 0:
+                        phases_plane = np.zeros((*nks, *n_lambda, n_states, n_states), dtype=complex)
+                    else:
+                        phases_plane = np.zeros((*nks, n_states, n_states), dtype=complex)
                 else:
-                    phases_plane = np.zeros(nks, dtype=float)
-
+                    if self.dim_lam > 0:
+                        phases_plane = np.zeros((*nks, *n_lambda), dtype=complex)
+                    else:
+                        phases_plane = np.zeros(nks, dtype=complex)
+                
                 # loop over all plaquettes in this plane
-                for idx in np.ndindex(*nks):
+                for idx in adia_idxes:
                     idx = np.array(idx) # e.g. for 3D [0, 0, 0] ... [3, 0, 0] ... [3, 5, 0] etc.
+
+                    if not self.pbc_lam and self.dim_lam > 0:
+                        if (np.any(idx[self.k_mesh.dim:] == n_lam_max) and (i == self.k_mesh.dim or j == self.k_mesh.dim) ):
+                            print("here")
+
+                            continue
 
                     # define indices of the 4 points of the plaquette, add to the index if in the plane
                     # e.g. idx = [1, 0, 0], (i=1, j=2) --> computing Omega_yz, so we have 
@@ -1142,45 +1591,95 @@ class Bloch(wf_array):
                     # Extract wavefunctions for the loop
                     wf_use = []
                     for p_idx in plaquette_points:
-                        mod_idx = np.mod(p_idx, nks)  # Apply PBC to index
+                        # correctly finds idx with pbc, assuming pbc on all indices
+                        # print(p_idx)
+                        if self.dim_lam > 0:
+                            if self.pbc_lam:
+                                mod_idx = np.mod(p_idx, (*nks, *n_lambda))  # Apply PBC to index
+                            else:
+                                mod_idx_k = np.mod(p_idx[:self.k_mesh.dim], nks)
+                                mod_idx_lam = p_idx[self.k_mesh.dim:]
+                                mod_idx = (*mod_idx_k, *mod_idx_lam)
+                        else:
+                            mod_idx = np.mod(p_idx, nks)
+
+                        # print(mod_idx)
+                        # print()
+
                         wf_nbr = np.copy(wfs[tuple(mod_idx)])  # (n_states, n_orb, [opt: n_spin])
+                        # print(wf_nbr.shape)
 
                         diff = p_idx - mod_idx  # Nonzero if crossed BZ boundary 
-                        crossed_BZ_bndry = np.any(diff)
+                        diff_k = diff[:self.k_mesh.dim]
+                        crossed_BZ_bndry = np.any(diff_k)
+                        # print(crossed_BZ_bndry)
+
                         if crossed_BZ_bndry:  # Apply boundary condition for u_nk
-                            G = np.divide(diff, nks)  # G-vector is 1 along dimension crossed
+                            G = np.divide(diff_k, nks)  # G-vector is 1 along dimension crossed
+                            # print(G)
+                            # print(orb_vecs.T)
+                            # print(G @ orb_vecs.T)
                             phase = np.exp(-2j * np.pi * G @ orb_vecs.T) # (n_orb,)
+
                             if self._nspin == 1:
                                 # newaxis for states
-                                wf_nbr = wf_nbr * phase[np.newaxis, ...] # (1, n_orb) 
+                                phase =  phase[np.newaxis, ...] # (1, n_orb) 
                             elif self._nspin == 2:
                                 # newaxis for states and spin
-                                wf_nbr = wf_nbr * phase[np.newaxis, ..., np.newaxis] # (1, n_orb, 1)
+                                phase = phase[np.newaxis, ..., np.newaxis] # (1, n_orb, 1)
+                            
+                            wf_nbr = wf_nbr * phase
                         
                         wf_use.append(wf_nbr)
+                        # print()
+
                     wf_use = np.array(wf_use, dtype=complex)
 
-                    if non_Abelian:
+                    if non_abelian:
                         U_wilson = self.wilson_loop(wf_use)
-                        phases_plane[tuple(idx)] = np.log(U_wilson).imag
+                        eigvals, eigvecs = np.linalg.eig(U_wilson)
+                        phases_plane[tuple(idx)] = eigvecs @ -np.angle(np.diag(eigvals)) @ np.linalg.inv(eigvecs)
+
                     else:
                         # Compute Berry phase for this plaquette
                         phases_plane[tuple(idx)] = self.berry_loop(wf_use)
         
                 # Store the phases for this plane
+                # TODO: Is Non-Abelian still antisymmetric?
                 Berry_flux[i, j] = phases_plane
                 Berry_flux[j, i] = -phases_plane
 
         return Berry_flux
             
     #TODO finish non_Abelian
-    def berry_curv(self, dirs=None, state_idx=None, non_Abelian=False):
-        nks = self.k_mesh.nks
+    def berry_curv(self, dirs=None, state_idx=None, non_abelian=False, diff_lam=1, return_flux=False):
+        nks = self.nks
         recip_lat_vecs = self.model.get_recip_lat_vecs()
-        delta_k = np.array([recip_lat_vecs[k_idx]/(nk-1) for k_idx, nk in enumerate(nks)])
+
+        # Get number of spatial (k-space) and adiabatic (λ-space) dimensions
+        dim_k = len(self.nks)      # Number of k-space dimensions
+        dim_lam = len(self.n_lambda)  # Number of adiabatic dimensions
+        dim_total = dim_k + dim_lam          # Total number of dimensions
+
+        if self.dim_lam > 0:
+            # Construct delta_k with 4D embedding (extra zeros for adiabatic params)
+            delta_k = np.zeros((dim_k, dim_total))  # (3, dim_total)
+            delta_k[:, :dim_k] = recip_lat_vecs / np.array(self.nks)[:, None]
+
+            # Construct delta_lambda (embedding into 4D with zeros in k-space parts)
+            delta_lam = np.zeros((dim_lam, dim_total))  # (dim_lam, dim_total)
+            np.fill_diagonal(delta_lam[:, dim_k:], diff_lam / np.array(self.n_lambda))
+
+            # Stack k-space and adiabatic-space vectors together
+            dk = np.vstack([delta_k, delta_lam])  # (dim_total, dim_total)
+            print(dk)
+            
+        else:
+            dk = np.array([recip_lat_vecs[k_idx]/(nk) for k_idx, nk in enumerate(nks)])
+            print(dk)
         
         # Occupied states
-        Berry_flux = self.berry_flux_plaq(state_idx=state_idx, non_Abelian=non_Abelian) 
+        Berry_flux = self.berry_flux_plaq(state_idx=state_idx, non_abelian=non_abelian) 
         Berry_curv = np.zeros_like(Berry_flux, dtype=complex)
         dim = Berry_flux.shape[0] # number of dimensions in parameter space
         # Loop over planes (off-diagonal elements only)
@@ -1191,19 +1690,32 @@ class Bloch(wf_array):
                     continue
                 else:
                     # Area element for the (i, j)-plane
-                    area_element = abs(np.linalg.det(np.array([delta_k[i], delta_k[j]])))
+                    A = np.vstack([dk[i], dk[j]])
+                    # area_element = np.prod([np.linalg.norm(dk[i]), np.linalg.norm(dk[j])])
+                    area_element = np.sqrt(np.linalg.det(A @ A.T))
+                    print(A)
+                    # area_element = np.linalg.det(A)
+                    
+                    print(area_element)
+       
                     # Divide flux by the area element to get approx curvature
                     Berry_curv[i, j] = Berry_flux[i, j] / area_element
 
         if dirs is not None:
-            return Berry_curv[dirs]
+            if return_flux:
+                return Berry_curv[dirs], Berry_flux[dirs]
+            else:
+                return Berry_curv[dirs]
         else:
-            return Berry_curv
+            if return_flux:
+                return Berry_curv, Berry_flux
+            else:
+                return Berry_curv
     
 
-    def chern_num(self, band_idxs=None, dirs=(0,1)):
+    def chern_num(self, dirs=(0,1), band_idxs=None):
         if band_idxs is None:
-            n_occ = int(self.model._n_orb/2)
+            n_occ = int(self._n_states/2)
             band_idxs = np.arange(n_occ) # assume half-filled occupied
 
         berry_flux = self.berry_flux_plaq(state_idx=band_idxs)
@@ -1226,28 +1738,28 @@ class Bloch(wf_array):
 
         return w_b[0] * np.sum(T_kb, axis=-1)
     
-    #TODO allow for subbands
-    def omega_til(self):
-        M = self._M
-        w_b, k_shell, idx_shell = self.k_mesh.get_weights(N_sh=1)
-        w_b = w_b[0]
-        k_shell = k_shell[0]
+    # #TODO allow for subbands
+    # def omega_til(self):
+    #     M = self._M
+    #     w_b, k_shell, idx_shell = self.k_mesh.get_weights(N_sh=1)
+    #     w_b = w_b[0]
+    #     k_shell = k_shell[0]
 
-        nks = M.shape[:-3]
-        Nk = np.prod(nks)
-        k_axes = tuple([i for i in range(len(nks))])
+    #     nks = M.shape[:-3]
+    #     Nk = np.prod(nks)
+    #     k_axes = tuple([i for i in range(len(nks))])
 
-        diag_M = np.diagonal(M, axis1=-1, axis2=-2)
-        log_diag_M_imag = np.log(diag_M).imag
-        abs_diag_M_sq = abs(diag_M) ** 2
+    #     diag_M = np.diagonal(M, axis1=-1, axis2=-2)
+    #     log_diag_M_imag = np.log(diag_M).imag
+    #     abs_diag_M_sq = abs(diag_M) ** 2
 
-        r_n = -(1 / Nk) * w_b * np.sum(log_diag_M_imag, axis=k_axes).T @ k_shell
+    #     r_n = -(1 / Nk) * w_b * np.sum(log_diag_M_imag, axis=k_axes).T @ k_shell
 
-        Omega_tilde = (1 / Nk) * w_b * ( 
-                np.sum((-log_diag_M_imag - k_shell @ r_n.T)**2) + 
-                np.sum(abs(M)**2) - np.sum(abs_diag_M_sq)
-            )
-        return Omega_tilde
+    #     Omega_tilde = (1 / Nk) * w_b * ( 
+    #             np.sum((-log_diag_M_imag - k_shell @ r_n.T)**2) + 
+    #             np.sum(abs(M)**2) - np.sum(abs_diag_M_sq)
+    #         )
+    #     return Omega_tilde
     
 
     def interp_op(self, O_k, k_path, plaq=False):
@@ -1364,9 +1876,6 @@ class Wannier():
         self.tilde_states: Bloch = Bloch(model, *nks)
 
         self.supercell = list(product(*[range(-int((nk-nk%2)/2), int((nk-nk%2)/2)) for nk in nks]))  # used for real space looping of WFs
-
-    def get_tilde_states(self):
-        return self.tilde_states.get_states()
     
     def get_Bloch_Ham(self):
         return self.tilde_states.get_Bloch_Ham() 
@@ -1381,34 +1890,86 @@ class Wannier():
         """
         Args:
             tf_list: list[int | list[tuple]]
-                list of numbers or tuples defining either the integer site
-                of the trial function (delta) or the tuples (site, amplitude)
+                list of tuples defining the orbital and amplitude of the trial function
+                on that orbital. Of the form [ [(orb, amp), ...], ...]. If spin is included,
+                then the form is [ [(orb, spin, amp), ...], ...]
     
         Returns:
-            tfs (num_tf x norb np.ndarray): 2 dimensional array of trial functions
+            tfs: np.ndarray
+                Array of trial functions
         """
 
         # number of trial functions to define
         num_tf = len(tf_list)
 
-        # initialize array containing tfs = "trial functions"
-        tfs = np.zeros([num_tf, self.model._n_orb], dtype=complex)
-        for j, tf in enumerate(tf_list):
-            if isinstance(tf, (int, np.int64)):
-                # trial function only has weight on one site
-                tfs[j, tf] = 1
-            elif isinstance(tf, (list, np.ndarray)):
-                # Must be list of tuples of the form (site, amplitude)
+        if self.model._nspin == 2:
+            tfs = np.zeros([num_tf, self.model._norb, 2], dtype=complex)
+            for j, tf in enumerate(tf_list):
+                assert isinstance(tf, (list, np.ndarray)), "Trial function must be a list of tuples"
+                for orb, spin, amp in tf:
+                    tfs[j, orb, spin] = amp
+                tfs[j] /= np.linalg.norm(tfs[j])
+
+        elif self.model._nspin == 1:
+            # initialize array containing tfs = "trial functions"
+            tfs = np.zeros([num_tf, self.model._norb], dtype=complex)
+            for j, tf in enumerate(tf_list):
+                assert isinstance(tf, (list, np.ndarray)), "Trial function must be a list of tuples"
                 for site, amp in tf:
                     tfs[j, site] = amp
-                # normalizing
-                tfs[j, :] /= np.sqrt(sum(abs(tfs[j, :])))
-            else:
-                raise TypeError("tf_list is not of apporpriate type")
-
-        # return numpy array containing trial functions
-        return tfs  # tfs in order[trial funcs, orbitals]
+                tfs[j] /= np.linalg.norm(tfs[j])
+            
+        return tfs 
     
+    def set_trial_wfs(self, tf_list):
+        tfs = self.get_trial_wfs(tf_list)
+        self.trial_wfs = tfs
+        self.n_twfs = tfs.shape[0]
+        return
+
+    def get_tf_ovlp_mat(self, band_idxs, psi_wfs=None):
+        """
+        Returns A_{k, n, j} = <psi_{n,k} | t_{j}> where psi are Bloch states and t are
+        the trial wavefunctions.
+
+        Args:
+            psi_wfs (np.array): Bloch eigenstates
+            tfs (np.array): trial wfs
+            state_idx (list): band indices to form overlap matrix with
+
+        Returns:
+            A (np.array): overlap matrix
+        """
+        if psi_wfs is None:
+            # get Bloch psi_nk energy eigenstates
+            psi_wfs = self.energy_eigstates.get_states()["Bloch"]
+
+        # flatten along spin dimension in case spin is considered
+        n_spin = self.model._nspin
+        dim_k = self.k_mesh.dim
+        num_axes = len(psi_wfs.shape)
+        if num_axes != dim_k + 2 + n_spin - 1:
+            # we have psi_wf defined on a 1D path in dim_k BZ
+            new_shape = (*psi_wfs.shape[:2], -1)
+        else:
+            new_shape = (*psi_wfs.shape[:self.k_mesh.dim+1], -1)
+        psi_wfs = psi_wfs.reshape(*new_shape)
+
+        # only keep band_idxs
+        psi_wfs = np.take(psi_wfs, band_idxs, axis=-2)
+
+        assert hasattr(self, 'trial_wfs'), "Must initialize trial wfs with set_trial_wfs()"
+        trial_wfs = self.trial_wfs
+        # flatten along spin dimension in case spin is considered
+        trial_wfs = trial_wfs.reshape((*trial_wfs.shape[:1], -1))
+
+        A_k = np.einsum("...ij, kj -> ...ik", psi_wfs.conj(), trial_wfs)
+        return A_k
+    
+    def set_tf_ovlp_mat(self, band_idxs):
+        A_k = self.get_tf_ovlp_mat(band_idxs)
+        self.A_k = A_k
+        return
     
     def set_tilde_states(self, tilde_states, cell_periodic=False):
         # set tilde states
@@ -1425,38 +1986,25 @@ class Wannier():
         self.omega_i = spread[0][1]
         self.omega_til = spread[0][2]
         self.centers = spread[1]
-
     
-    def tf_overlap_mat(self, psi_wfs, tfs, state_idx):
-        """
-        Returns A_{k, n, j} = <psi_{n,k} | t_{j}> where psi are Bloch states and t are
-        the trial wavefunctions.
-
-        Args:
-            psi_wfs (np.array): Bloch eigenstates
-            tfs (np.array): trial wfs
-            state_idx (list): band indices to form overlap matrix with
-
-        Returns:
-            A (np.array): overlap matrix
-        """
-        psi_wfs = np.take(psi_wfs, state_idx, axis=-2)
-        A = np.einsum("...ij, kj -> ...ik", psi_wfs.conj(), tfs)
-        return A
-    
-    
-    def get_psi_tilde(self, psi_wfs, tfs, state_idx):
+    def get_psi_tilde(self, psi_wfs, state_idx):
         """
         Performs optimal alignment of psi_wfs with tfs.
         """
-        A = self.tf_overlap_mat(psi_wfs, tfs, state_idx=state_idx)
-        V, _, Wh = np.linalg.svd(A, full_matrices=False)
-        # transpose V@Wh along last two indices
-        psi_tilde = np.swapaxes(V @ Wh, -1, -2) @ psi_wfs[..., state_idx, :] # [*nk, nband, norb]
+        A_k = self.get_tf_ovlp_mat(state_idx, psi_wfs=psi_wfs)
+        V_k, _, Wh_k = np.linalg.svd(A_k, full_matrices=False)
+
+        # flatten spin dimensions
+        psi_wfs = psi_wfs.reshape((*psi_wfs.shape[:self.k_mesh.dim+1], -1))
+        # take only state_idxs
+        psi_wfs = np.take(psi_wfs, state_idx, axis=-2)
+        # optimal alignment
+        psi_tilde = np.einsum("...mn, ...mj -> ...nj", V_k @ Wh_k, psi_wfs) # shape: (*nks, states, orbs*n_spin])
+
         return psi_tilde
     
     
-    def single_shot(self, tf_list: list, band_idxs: list | None = None, tilde=False):
+    def single_shot(self, tf_list: list | None = None, band_idxs: list | None = None, tilde=False):
         """
         Sets the Wannier functions in home unit cell with associated spreads, centers, trial functions 
         and Bloch-like states using the single shot projection method.
@@ -1467,29 +2015,38 @@ class Wannier():
         Returns:
             w_0n (np.array): Wannier functions in home unit cell
         """
-
-        self.tf_list = tf_list
-        self.trial_wfs = self.get_trial_wfs(tf_list)
+        if tf_list is None:
+            assert hasattr(self, 'trial_wfs'), "Must initialize trial wfs with set_trial_wfs()"
+        else:
+            self.set_trial_wfs(tf_list)
 
         if tilde:
+            # projecting back onto tilde states
             if band_idxs is None:  # assume we are projecting onto all tilde states
-                band_idxs = list(range(self.tilde_states._psi_wfs.shape[-2]))
+                band_idxs = list(range(self.tilde_states._n_states))
 
             psi_til_til = self.get_psi_tilde(
-                self.tilde_states._psi_wfs, self.trial_wfs, state_idx=band_idxs
+                self.tilde_states._psi_wfs, state_idx=band_idxs
                 )
             self.set_tilde_states(psi_til_til, cell_periodic=False)
 
-        if not tilde:
-            if band_idxs is None:  # assume we are Wannierizing occupied bands at half-filling
-                n_occ = int(self.energy_eigstates._n_states / 2)  # assuming half filled
+        else:
+            # projecting onto Bloch energy eigenstates
+            if band_idxs is None:  # assume we are Wannierizing occupied bands
+                if self.model._nspin == 1:
+                    n_occ = int(self.energy_eigstates._n_states / 2)  # assuming half filled
+                elif self.model._nspin == 2:
+                    n_occ = int(self.energy_eigstates._n_states / 2)*2  # assuming half filled
+
                 band_idxs = list(range(0, n_occ))
 
-            psi_tilde = self.get_psi_tilde(self.energy_eigstates._psi_wfs, self.trial_wfs, state_idx=band_idxs)
+            psi_tilde = self.get_psi_tilde(self.energy_eigstates._psi_wfs, state_idx=band_idxs)
+            if self.model._nspin == 2:
+                psi_tilde = psi_tilde.reshape((*psi_tilde.shape[:self.k_mesh.dim+1], -1, 2))
             self.tilde_states.set_wfs(psi_tilde, cell_periodic=False)
 
         psi_wfs = self.tilde_states._psi_wfs
-        dim_k = len(psi_wfs.shape[:-2])
+        dim_k = self.k_mesh.dim
         # DFT
         self.WFs = np.fft.ifftn(psi_wfs, axes=[i for i in range(dim_k)], norm=None)
 
@@ -1584,11 +2141,6 @@ class Wannier():
         T_kb = np.zeros((*nks, num_nnbrs), dtype=complex)
         for idx, idx_vec in enumerate(idx_shell[0]):  # nearest neighbors
             T_kb[..., idx] = np.trace(P[..., :, :] @ Q_nbr[..., idx, :, :], axis1=-1, axis2=-2)
-        
-        # T_kb = np.zeros((*nks, num_nnbrs), dtype=complex)
-        # for idx, idx_vec in enumerate(idx_shell[0]):  # nearest neighbors
-        #     Q_nbr = np.roll(Q, shift=tuple(-idx_vec), axis=self.tilde_states.k_axes)
-        #     T_kb[..., idx] = np.trace(P[..., :, :] @ Q_nbr, axis1=-1, axis2=-2)
 
         return (1 / Nk) * w_b[0] * np.sum(T_kb)
     
@@ -1611,19 +2163,6 @@ class Wannier():
 
         return (1 / Nk) * w_b[0] * np.sum(T_kb, axis=-1)
     
-    def get_omega_I_k(self):
-        P = self.tilde_states.get_projector()
-        P_nbr, Q_nbr = self.tilde_states.get_nbr_projector(return_Q=True)
-        nks = self.k_mesh.nks
-        Nk = np.prod(nks)
-        num_nnbrs = self.k_mesh.num_nnbrs
-        w_b, _, idx_shell = self.k_mesh.get_weights(N_sh=1)
-
-        T_kb = np.zeros((*nks, num_nnbrs), dtype=complex)
-        for idx, idx_vec in enumerate(idx_shell[0]):  # nearest neighbors
-            T_kb[..., idx] = np.trace(P[..., :, :] @ Q_nbr[..., idx, :, :], axis1=-1, axis2=-2)
-
-        return (1 / Nk) * w_b[0] * np.sum(T_kb, axis=-1)
     
      ####### Maximally Localized WF #######
 
@@ -1636,13 +2175,18 @@ class Wannier():
         Nk = np.prod(nks)
         n_orb = self.model._n_orb
         n_occ = int(n_orb/2)
+        if self.model._nspin == 2:
+            n_occ *= 2
+
 
         # eigenenergies and eigenstates for inner/outer window
         energies = self.energy_eigstates.get_energies()
         unk_states = self.energy_eigstates.get_states()["Cell periodic"]
-
         # initial subspace
         init_states = self.tilde_states
+
+        if self.model._nspin == 2:
+            unk_states = unk_states.reshape((*unk_states.shape[:self.k_mesh.dim+1], -1))
       
         #### Setting inner/outer energy windows ####
 
@@ -1895,6 +2439,9 @@ class Wannier():
 
         # initial subspace
         init_states = self.tilde_states
+        energy_eigstates = self.energy_eigstates
+        u_wfs = energy_eigstates.get_states(flatten_spin=True)["Cell periodic"]
+        # u_wfs_til = init_states.get_states(flatten_spin=True)["Cell periodic"]
 
         if N_wfs is None:
             # assume number of states in the subspace is number of tilde states 
@@ -1903,7 +2450,7 @@ class Wannier():
         if outer_bands == "occupied":
             outer_bands = list(range(n_occ))
 
-        outer_states = self.energy_eigstates._u_wfs.take(outer_bands, axis=-2)
+        outer_states = u_wfs.take(outer_bands, axis=-2)
 
         # Projector of initial tilde subspace at each k-point
         if inner_bands is None:
@@ -1913,7 +2460,7 @@ class Wannier():
             T_kb = np.einsum('...ij, ...kji -> ...k', P, Q_nbr)
         else:
             N_inner = len(inner_bands)
-            inner_states = self.energy_eigstates._u_wfs.take(inner_bands, axis=-2)
+            inner_states = u_wfs.take(inner_bands, axis=-2)
 
             P_inner = np.swapaxes(inner_states, -1, -2) @ inner_states.conj()
             Q_inner = np.eye(P_inner.shape[-1]) - P_inner
@@ -1937,7 +2484,7 @@ class Wannier():
 
         # manifold from which we borrow states to minimize omega_i
         comp_bands = list(np.setdiff1d(outer_bands, inner_bands))
-        comp_states = self.energy_eigstates._u_wfs[..., comp_bands, :]
+        comp_states = u_wfs.take(comp_bands, axis=-2)
 
         omega_I_prev = (1 / Nk) * w_b[0] * np.sum(T_kb)
 
@@ -1966,7 +2513,7 @@ class Wannier():
                 P_nbr_min = P_nbr_new 
 
             if verbose:
-                Q_nbr_min = np.eye(n_orb) - P_nbr_min 
+                Q_nbr_min = np.eye(n_orb*self.model._nspin) - P_nbr_min 
                 T_kb = np.einsum('...ij, ...kji -> ...k', P_min, Q_nbr_min)
                 omega_I_new = (1 / Nk) * w_b[0] * np.sum(T_kb)
 
@@ -2049,12 +2596,11 @@ class Wannier():
             S_T = (T + np.transpose(T, axes=(0,1,2,4,3)).conj()) / (2j)
             G = 4 * w_b * np.sum(A_R - S_T, axis=-3)
             U = np.einsum("...ij, ...jk -> ...ik", U, self.mat_exp(eta * eps * G))
-
+            
             for idx, idx_vec in enumerate(idx_shell):
                 M[..., idx, :, :] = (
-                    np.transpose(U, axes=(0,1,3,2)).conj()[..., :, :] @  M0[..., idx, :, :] 
-                                    @ np.roll(U, shift=tuple(-idx_vec), axis=(0,1))[..., :, :]
-                                    )
+                    np.swapaxes(U, -1, -2).conj() @  M0[..., idx, :, :] @ np.roll(U, shift=tuple(-idx_vec), axis=(0,1))
+                    )
 
             grad_mag = np.linalg.norm(np.sum(G, axis=(0,1)))
             omega_tilde_new = self._get_Omega_til(M, w_b, k_shell)
@@ -2068,7 +2614,7 @@ class Wannier():
                 print("Omega_tilde minimization has converged within tolerance. Breaking the loop.")
                 return U
             
-            if grad_mag_prev < grad_mag:
+            if grad_mag_prev < grad_mag and i != 0:
                 if verbose:
                     print("Warning: Gradient increasing.")
                 eps *= 0.9
@@ -2117,7 +2663,7 @@ class Wannier():
         U = self.find_min_unitary(
             eps=eps, iter_num=iter_num, verbose=verbose, tol=tol, grad_min=grad_min)
         
-        u_tilde_wfs = self.tilde_states._u_wfs
+        u_tilde_wfs = self.tilde_states.get_states(flatten_spin=True)["Cell periodic"]
         util_max_loc = np.einsum('...ji, ...jm -> ...im', U, u_tilde_wfs)
         
         self.set_tilde_states(util_max_loc, cell_periodic=True)
@@ -2186,12 +2732,22 @@ class Wannier():
 
     def interp_energies(self, k_path, wan_idxs=None, ret_eigvecs=False, u_tilde=None):
         if u_tilde is None:
-            u_tilde = self.get_tilde_states()["Cell periodic"]
+            # if self.model._nspin == 2:
+            #     u_tilde = self.tilde_states.get_states(flatten_spin=True)["Cell periodic"]
+            # else:
+            u_tilde = self.tilde_states.get_states(flatten_spin=False)["Cell periodic"]
         if wan_idxs is not None:
             u_tilde = np.take_along_axis(u_tilde, wan_idxs, axis=-2)
 
         H_k = self.get_Bloch_Ham()
-        H_rot_k = u_tilde[..., :, :].conj() @ H_k @ np.transpose(u_tilde[..., : ,:], axes=(0,1,3,2))
+        if self.model._nspin == 2:
+            new_shape = H_k.shape[:-4] + (2*self.model._norb, 2*self.model._norb)
+            H_k = H_k.reshape(*new_shape)
+
+        H_rot_k = u_tilde.conj() @ H_k @ np.swapaxes(u_tilde, -1, -2)
+        eigvals, eigvecs = np.linalg.eigh(H_rot_k)
+        eigvecs = np.einsum('...ij, ...ik->...kj', u_tilde, eigvecs)
+        # eigvecs = np.swapaxes(eigvecs, -1, -2)
 
         k_mesh = self.k_mesh.square_mesh
         k_idx_arr = self.k_mesh.idx_arr
@@ -2203,35 +2759,46 @@ class Wannier():
         # Fourier transform to real space
         H_R = np.zeros((len(supercell), H_rot_k.shape[-1], H_rot_k.shape[-1]), dtype=complex)
         u_R = np.zeros((len(supercell), u_tilde.shape[-2], u_tilde.shape[-1]), dtype=complex)
-        for idx, (x, y) in enumerate(supercell):
+        eval_R = np.zeros((len(supercell), eigvals.shape[-1]), dtype=complex)
+        evecs_R = np.zeros((len(supercell), eigvecs.shape[-2], eigvecs.shape[-1]), dtype=complex)
+        for idx, r in enumerate(supercell):
             for k_idx in k_idx_arr:
-                R_vec = np.array([x, y])
+                R_vec = np.array([*r])
                 phase = np.exp(-1j * 2 * np.pi * np.vdot(k_mesh[k_idx], R_vec))
-                H_R[idx, :, :] += H_rot_k[k_idx] * phase / Nk
-                u_R[idx] += u_tilde[k_idx] * phase / Nk
+                # H_R[idx, :, :] += H_rot_k[k_idx] * phase / Nk
+                # u_R[idx] += u_tilde[k_idx] * phase / Nk
+                eval_R[idx] += eigvals[k_idx] * phase / Nk
+                evecs_R[idx] += eigvecs[k_idx] * phase / Nk
 
         # interpolate to arbitrary k
         H_k_interp = np.zeros((k_path.shape[0], H_R.shape[-1], H_R.shape[-1]), dtype=complex)
         u_k_interp = np.zeros((k_path.shape[0], u_R.shape[-2], u_R.shape[-1]), dtype=complex)
-        for k_idx, k in enumerate(k_path):
-            for idx, (x, y) in enumerate(supercell):
-                R_vec = np.array([x, y])
-                phase = np.exp(1j * 2 * np.pi * np.vdot(k, R_vec))
-                H_k_interp[k_idx] += H_R[idx] * phase
-                u_k_interp[k_idx] += u_R[idx] * phase
+        eigvals_k_interp = np.zeros((k_path.shape[0], eval_R.shape[-1]), dtype=complex)
+        eigvecs_k_interp = np.zeros((k_path.shape[0], evecs_R.shape[-2], evecs_R.shape[-1]), dtype=complex)
 
-        eigvals, eigvecs = np.linalg.eigh(H_k_interp)
-        eigvecs = np.einsum('...ij, ...ik->...jk', u_k_interp, eigvecs)
-        eigvecs = np.transpose(eigvecs, axes=(0, 2, 1))
+        for k_idx, k in enumerate(k_path):
+            for idx, r in enumerate(supercell):
+                R_vec = np.array([*r])
+                phase = np.exp(1j * 2 * np.pi * np.vdot(k, R_vec))
+                # H_k_interp[k_idx] += H_R[idx] * phase
+                # u_k_interp[k_idx] += u_R[idx] * phase
+                eigvals_k_interp[k_idx] += eval_R[idx] * phase
+                eigvecs_k_interp[k_idx] += evecs_R[idx] * phase
+
+        # eigvals, eigvecs = np.linalg.eigh(H_k_interp)
+        # eigvecs = np.einsum('...ij, ...ik -> ...kj', u_k_interp, eigvecs)
+        # # normalizing
+        # eigvecs /= np.linalg.norm(eigvecs, axis=-1, keepdims=True)
+        eigvecs_k_interp /= np.linalg.norm(eigvecs_k_interp, axis=-1, keepdims=True)
 
         if ret_eigvecs:
-            return eigvals, eigvecs
+            return eigvals_k_interp.real, eigvecs_k_interp
         else:
             return eigvals
     
     
     def interp_op(self, O_k, k_path, plaq=False):
-        return self.energy_eigstates.interp_op(O_k, k_path, plaq=plaq)
+        return self.tilde_states.interp_op(O_k, k_path, plaq=plaq)
        
 
     def report(self):
@@ -2251,7 +2818,7 @@ class Wannier():
 
         
     def get_supercell(self, Wan_idx, omit_sites=None):
-        w0 = self.WFs
+        w0 = self.WFs#.reshape((*self.WFs.shape[:self.k_mesh.dim+1], -1))
         center = self.centers[Wan_idx]
         orbs = self.model._orb_vecs
         lat_vecs = self.model._lat_vecs
@@ -2270,8 +2837,8 @@ class Wannier():
             for i, orb in enumerate(orbs):
                 # Extract relevant parameters
                 wf_value = w0[tx, ty, Wan_idx, i]
-                phase = np.arctan2(wf_value.imag, wf_value.real) 
-                wt = np.abs(wf_value) ** 2
+                wt = np.sum(np.abs(wf_value) ** 2)
+                # phase = np.arctan2(wf_value.imag, wf_value.real) 
                 pos = orb[0] * lat_vecs[0] + tx * lat_vecs[0] + orb[1] * lat_vecs[1] + ty * lat_vecs[1]
                 rel_pos = pos - center
                 x, y, rad = pos[0], pos[1], np.sqrt(rel_pos[0] ** 2 + rel_pos[1] ** 2)
@@ -2281,7 +2848,7 @@ class Wannier():
                 positions['all']['ys'].append(y)
                 positions['all']['r'].append(rad)
                 positions['all']['wt'].append(wt)
-                positions['all']['phase'].append(phase)
+                # positions['all']['phase'].append(phase)
 
                 # Handle omit site if applicable
                 if omit_sites is not None and i in omit_sites:
@@ -2289,33 +2856,33 @@ class Wannier():
                     positions['omit']['ys'].append(y)
                     positions['omit']['r'].append(rad)
                     positions['omit']['wt'].append(wt)
-                    positions['omit']['phase'].append(phase)
+                    # positions['omit']['phase'].append(phase)
                 # Separate even and odd index sites
                 if i % 2 == 0:
                     positions['even']['xs'].append(x)
                     positions['even']['ys'].append(y)
                     positions['even']['r'].append(rad)
                     positions['even']['wt'].append(wt)
-                    positions['even']['phase'].append(phase)
+                    # positions['even']['phase'].append(phase)
                     if tx == ty == 0:
                         positions['home even']['xs'].append(x)
                         positions['home even']['ys'].append(y)
                         positions['home even']['r'].append(rad)
                         positions['home even']['wt'].append(wt)
-                        positions['home even']['phase'].append(phase)
+                        # positions['home even']['phase'].append(phase)
 
                 else:
                     positions['odd']['xs'].append(x)
                     positions['odd']['ys'].append(y)
                     positions['odd']['r'].append(rad)
                     positions['odd']['wt'].append(wt)
-                    positions['odd']['phase'].append(phase)
+                    # positions['odd']['phase'].append(phase)
                     if tx == ty == 0:
                         positions['home odd']['xs'].append(x)
                         positions['home odd']['ys'].append(y)
                         positions['home odd']['r'].append(rad)
                         positions['home odd']['wt'].append(wt)
-                        positions['home odd']['phase'].append(phase)
+                        # positions['home odd']['phase'].append(phase)
 
 
         # Convert lists to numpy arrays (batch processing for cleanliness)
@@ -2538,7 +3105,9 @@ class Wannier():
         title=None, save_name=None, show=False, legend=False, pmx=4, pmy=4,
         kwargs_centers={'s': 80, 'marker': '*', 'c': 'g'},
         kwargs_omit={'s': 50, 'marker': 'x', 'c':'k'},
-        kwargs_lat={'s':10, 'marker': 'o', 'c':'k'}, fig=None, ax=None
+        kwargs_lat_ev={'s':10, 'marker': 'o', 'c':'k'}, 
+        kwargs_lat_odd={'s':10, 'marker': 'o', 'facecolors':'none', 'edgecolors':'k'},
+        fig=None, ax=None
     ):
         lat_vecs = self.model.get_lat_vecs()
         orbs = self.model.get_orb_vecs(Cartesian=False)
@@ -2642,18 +3211,21 @@ class Wannier():
                 xs_odd_out, ys_odd_out = zip(*out_odd)
             else:
                 xs_odd_out, ys_odd_out = [], []  # In case no points are left
-            
-            if 'c' in kwargs_lat.keys():
-                kwargs_lat.pop('c')
-            ax.scatter(xs_ev_out, ys_ev_out, zorder=2, c='k', **kwargs_lat)
-            ax.scatter(xs_odd_out, ys_odd_out, zorder=2, facecolors='none', edgecolors='k', **kwargs_lat)
 
-            ax.scatter(xs_ev_home, ys_ev_home, zorder=2, c='k', **kwargs_lat)
-            ax.scatter(xs_odd_home, ys_odd_home,zorder=2, facecolors='none', edgecolors='k', **kwargs_lat)
+            ax.scatter(xs_ev_home, ys_ev_home, zorder=2, **kwargs_lat_ev)
+            ax.scatter(xs_odd_home, ys_odd_home, zorder=2, **kwargs_lat_odd)
+            
+            if 'c' in kwargs_lat_ev.keys():
+                kwargs_lat_ev.pop('c')
+            if 'c' in kwargs_lat_odd.keys():
+                kwargs_lat_odd.pop('c')
+
+            ax.scatter(xs_ev_out, ys_ev_out, zorder=2, **kwargs_lat_ev)
+            ax.scatter(xs_odd_out, ys_odd_out, zorder=2, **kwargs_lat_odd)
         
         else:
-            ax.scatter(xs_ev, ys_ev, zorder=2, **kwargs_lat)
-            ax.scatter(xs_odd, ys_odd, zorder=2, facecolors='none', edgecolors='k', **kwargs_lat)
+            ax.scatter(xs_ev, ys_ev, zorder=2, **kwargs_lat_ev)
+            ax.scatter(xs_odd, ys_odd, zorder=2, **kwargs_lat_odd)
 
         # draw lines sectioning out home supercell
         if section_home_cell:
@@ -2677,7 +3249,7 @@ class Wannier():
                 else:
                     label=None
                 ax.scatter(
-                    x, y, zorder=1, label=label, s=np.exp(10*self.spread[i])*center_scale, **kwargs_centers)
+                    x, y, zorder=1, label=label, s=np.exp(11*self.spread[i])*center_scale, **kwargs_centers)
             else:
                 center = centers[i]
                 label = "Wannier centers"
