@@ -2,7 +2,7 @@ from pythtb import *
 from numpy import sqrt
 import numpy as np
 import sys
-sys.path.append("../wanpy")
+# sys.path.append("../wanpy")
 from wpythtb import Model
 
 # used for testing purposes
