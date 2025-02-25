@@ -375,7 +375,7 @@ class Model(tb_model):
         recip_lat = self.get_recip_lat_vecs()
         # For non-orthogonal lattices, we need the full inverse matrix.
         inv_recip_lat = np.linalg.inv(recip_lat)
-        recip_lat_mag = [np.linalg.norm(vec) for vec in recip_lat]
+        recip_lat_mag = [1/np.linalg.norm(vec) for vec in recip_lat]
 
         # Loop over all hoppings
         for hopping in self._hoppings:
@@ -392,11 +392,13 @@ class Model(tb_model):
             delta_r = ind_R + self._orb[j, :] - self._orb[i, :]  # Shape: (dim_r,)
             # Keep only the periodic (reduced) components
             delta_r_per = delta_r[self._per]  # Shape: (dim_k,)
+            # delta_r_per_cart = delta_r_per @ lat_per
 
             # Compute phase factors for all k-points
             phase = np.exp(1j * 2 * np.pi * k_pts @ delta_r_per)  # Shape: (n_kpts,)
             # Include Jacobian for non-orthogonal lattices
             deriv =  1j * 2*np.pi * (inv_recip_lat @ delta_r_per)
+            # deriv = 1j * 2*np.pi * delta_r_per * recip_lat_mag 
 
             # Compute the amplitude for all k-points and components
             if self._nspin == 2:
