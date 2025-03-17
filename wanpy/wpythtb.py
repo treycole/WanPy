@@ -569,9 +569,7 @@ class Model(tb_model):
         Omega = self.berry_curvature(flat_mesh)
 
         Nk = Omega.shape[2] 
-        V_BZ = self.get_recip_vol()
-        dk_sq = V_BZ / Nk
-
+        dk_sq = 1 / Nk
         Chern = np.sum(np.trace(Omega[dirs], axis1=-1, axis2=-2)) * dk_sq / (2 * np.pi)
 
         return Chern.real
@@ -803,9 +801,14 @@ class K_mesh():
         self.Nk = np.prod(nks)
         self.dim: int = len(nks)
         self.recip_lat_vecs = model.get_recip_lat_vecs()
-        self.idx_arr: list = list(product(*[range(nk) for nk in nks]))  # 1D list of all k_indices (integers)
-        self.square_mesh: np.ndarray = self.gen_k_mesh(flat=False, endpoint=False) # each index is a direction in k-space
-        self.flat_mesh: np.ndarray = self.gen_k_mesh(flat=True, endpoint=False) # 1D list of k-vectors
+        # self.idx_arr = np.array(list(product(*[range(nk) for nk in nks])))  # 1D list of all k_indices (integers)
+        self.idx_arr = np.indices(nks).reshape(len(nks), -1).T
+
+        k_vals = [np.arange(nk) / nk for nk in nks] # exlcudes endpoint
+
+        sq_mesh = np.meshgrid(*k_vals, indexing='ij')
+        self.flat_mesh = np.stack(sq_mesh, axis=-1).reshape(-1, len(nks)) # 1D list of k-vectors
+        self.square_mesh = self.flat_mesh.reshape(*[nk for nk in nks], len(nks)) # each index is a direction in k-space
 
         # nearest neighbor k-shell
         self.nnbr_w_b, _, self.nnbr_idx_shell = self.get_weights(N_sh=1)
@@ -952,30 +955,65 @@ class K_mesh():
         """
         idx_shell = self.nnbr_idx_shell
         n_shell = idx_shell[0].shape[0]
-        k_idx_arr = np.array(self.idx_arr)
+        k_idx_arr = self.idx_arr
         Nk, dim_k = k_idx_arr.shape
-        
+
+        # Use the first shell vector array (shape: (n_shell, dim))
+        shell = idx_shell[0]  # shape: (n_shell, dim)
+
+        # Compute neighbor indices for all k-points at once: shape (N_k, n_shell, dim)
+        k_nbr_idx = k_idx_arr[:, None, :] + shell[None, :, :]
+
+        # Broadcast self.nks (tuple of ints) to shape (dim,) and compute mod indices
+        nks_array = np.array(self.nks)  # shape: (dim,)
+        mod_idx = np.mod(k_nbr_idx, nks_array)
+        diff = k_nbr_idx - mod_idx  # nonzero where boundary is crossed
+        G = diff / nks_array[None, None, :]  # shape: (N_k, n_shell, dim)
+
+        # Compute phase factors using tensordot:
+        # self.model._orb_vecs has shape (n_orb, dim), so the dot gives shape (N_k, n_shell, n_orb)
+        phases = np.exp(-1j * 2 * np.pi * np.tensordot(G, self.model._orb_vecs.T, axes=([2],[0])))
+
+        # Initialize bc_phase with ones in the appropriate shape:
         if self.model._nspin == 1:
-            bc_phase = np.ones((*self.nks, idx_shell[0].shape[0], self.model._orb_vecs.shape[0]), dtype=complex)
+            bc_phase = np.ones((*self.nks, n_shell, self.model._orb_vecs.shape[0]), dtype=complex)
+            bc_phase = bc_phase.reshape(Nk, n_shell, self.model._orb_vecs.shape[0])
+            # Replace only where a boundary crossing occurred:
+            # bc_phase[cross_mask] = phases[cross_mask]
+            bc_phase = phases
+            bc_phase = bc_phase.reshape(*self.nks, n_shell, self.model._orb_vecs.shape[0])
+
         else:
-            bc_phase = np.ones((*self.nks, idx_shell[0].shape[0], self.model._orb_vecs.shape[0], 2), dtype=complex)
+            bc_phase = np.ones((*self.nks, n_shell, self.model._orb_vecs.shape[0], 2), dtype=complex)
+            bc_phase = bc_phase.reshape(Nk, n_shell, self.model._orb_vecs.shape[0], 2)
+            # Expand phases to match spin dimension:
+            phases_exp = phases[..., np.newaxis]  # shape: (N_k, n_shell, n_orb, 1)
+            bc_phase = phases_exp
+            # Optionally reshape back if needed; here we flatten the last two spin-orbital axes:
+            bc_phase = bc_phase.reshape(*self.nks, n_shell, self.model._orb_vecs.shape[0], 2)
+        
 
-        for k_idx in self.idx_arr: # each index in k-mesh
-            for shell_idx, idx_vec in enumerate(idx_shell[0]):  # vecs connecting neighboring indices
-                k_nbr_idx = np.array(k_idx) + idx_vec # indices for neighboring k
-                mod_idx = np.mod(k_nbr_idx, self.nks) # apply pbc to index
-                diff = k_nbr_idx - mod_idx # if mod changed nbr, will be non-zero
-                G = np.divide(np.array(diff), np.array(self.nks)) # will be pm 1 where crossed, 0 else
-                # if the translated k-index contains -1 or nk_i+1 then we crossed the BZ boundary
-                cross_bndry = np.any((k_nbr_idx == -1) | np.logical_or.reduce([k_nbr_idx == nk for nk in self.nks]))
-                if cross_bndry:
-                    if self.model._nspin == 1:
-                        bc_phase[k_idx][shell_idx] = np.exp(-1j * 2 * np.pi * self.model._orb_vecs @ G.T).T
-                    else:
-                        bc_phase[k_idx][shell_idx, :] = np.exp(-1j * 2 * np.pi * self.model._orb_vecs @ G.T).T[..., np.newaxis]
+        # if self.model._nspin == 1:
+        #     bc_phase = np.ones((*self.nks, idx_shell[0].shape[0], self.model._orb_vecs.shape[0]), dtype=complex)
+        # else:
+        #     bc_phase = np.ones((*self.nks, idx_shell[0].shape[0], self.model._orb_vecs.shape[0], 2), dtype=complex)
 
-        if self.model._nspin == 2:
-            bc_phase = bc_phase.reshape(*bc_phase.shape[:self.dim+1], -1)  
+        # for k_idx in self.idx_arr: # each index in k-mesh
+        #     for shell_idx, idx_vec in enumerate(idx_shell[0]):  # vecs connecting neighboring indices
+        #         k_nbr_idx = np.array(k_idx) + idx_vec # indices for neighboring k
+        #         mod_idx = np.mod(k_nbr_idx, self.nks) # apply pbc to index
+        #         diff = k_nbr_idx - mod_idx # if mod changed nbr, will be non-zero
+        #         G = np.divide(np.array(diff), np.array(self.nks)) # will be pm 1 where crossed, 0 else
+        #         # if the translated k-index contains -1 or nk_i+1 then we crossed the BZ boundary
+        #         cross_bndry = np.any((k_nbr_idx == -1) | np.logical_or.reduce([k_nbr_idx == nk for nk in self.nks]))
+        #         if cross_bndry:
+        #             if self.model._nspin == 1:
+        #                 bc_phase[k_idx][shell_idx] = np.exp(-1j * 2 * np.pi * self.model._orb_vecs @ G.T).T
+        #             else:
+        #                 bc_phase[k_idx][shell_idx, :] = np.exp(-1j * 2 * np.pi * self.model._orb_vecs @ G.T).T[..., np.newaxis]
+
+        # if self.model._nspin == 2:
+        #     bc_phase = bc_phase.reshape(*bc_phase.shape[:self.dim+1], -1)  
 
         return bc_phase
     
