@@ -228,7 +228,6 @@ class Model(tb_model):
         for idx, pos in enumerate(self._orb_vecs):
             print(f"{idx} ===> {pos}")
 
-
     def get_lat_vecs(self):
         return super().get_lat()
 
@@ -261,7 +260,6 @@ class Model(tb_model):
         """
         
         k_arr = np.array(k_pts) if k_pts is not None else None
-        # k_arr = k_pts
 
         if k_pts is not None:
             # if kpnt is just a number then convert it to an array
@@ -290,8 +288,6 @@ class Model(tb_model):
                 ham[..., i, i] = self._site_energies[i]
             elif self._nspin == 2:
                 ham[..., i, :, i, :] = self._site_energies[i]
-                # ham = ham.at[..., i, :, i, :].set( self._site_energies[i])
-
 
         # Loop over all hoppings
         for hopping in self._hoppings:
@@ -324,8 +320,6 @@ class Model(tb_model):
                 ham[..., i, j] += amp 
                 ham[..., j, i] += amp.conjugate()
             elif self._nspin == 2:
-                # ham = ham.at[..., i, :, j, :].set(jnp.add(ham[..., i, :, j, :], amp))
-                # ham = ham.at[..., i, :, j, :].set(jnp.add(ham[..., i, :, j, :],  jnp.swapaxes(amp.conjugate(), -1, -2)))
                 ham[..., i, :, j, :] += amp
                 ham[..., j, :, i, :] += np.swapaxes(amp.conjugate(), -1, -2)
 
@@ -357,11 +351,9 @@ class Model(tb_model):
         """
         H_k = self.get_ham(k_arr) # (Nk, n_orb, n_orb) or (Nk, n_orb, n_spin, n_orb, n_spin)
 
-        # flatten spin
+        # flatten spin -- H_k is shape (Nk, n_orb*n_spin, n_orb*n_spin)
         new_shape = (H_k.shape[0],) + (self._nspin*self._norb, self._nspin*self._norb)
         H_k = H_k.reshape(*new_shape) 
-
-        # H_k is shape (Nk, n_orb*n_spin, n_orb*n_spin)
 
         if np.max(H_k-np.swapaxes(H_k.conj(), -1, -2)) > 1e-9:
             raise Exception("\n\nHamiltonian matrix is not hermitian?!")
@@ -391,7 +383,7 @@ class Model(tb_model):
             vel: Velocity operators at each k-point, shape (dim_k, n_kpts, n_orb, n_orb).
         """
         
-        # k_pts = np.array(k_pts)
+        k_pts = np.array(k_pts)
         dim_k = self.dim_k
         n_kpts = k_pts.shape[0]
 
@@ -407,15 +399,8 @@ class Model(tb_model):
         else:
             raise ValueError("Invalid spin value.")
 
-        # Precompute the lattice vectors for periodic directions
         # lat_per: lattice vectors in Cartesian coordinates for the periodic directions.
         lat_per = self.get_lat()[self._per, :]  # Shape: (dim_k, dim_k)
-        # recip_lat: full reciprocal lattice vectors (each is a vector)
-        recip_lat = self.get_recip_lat_vecs()
-        # For non-orthogonal lattices, we need the full inverse matrix.
-        inv_recip_lat = np.linalg.inv(recip_lat)
-        recip_lat_mag = np.array([1/np.linalg.norm(vec) for vec in recip_lat])
-        recip_lat_unit = np.array([vec/np.linalg.norm(vec) for vec in recip_lat])
 
         # Loop over all hoppings
         for hopping in self._hoppings:
@@ -432,7 +417,6 @@ class Model(tb_model):
             delta_r = ind_R + self._orb[j, :] - self._orb[i, :]  # Shape: (dim_r,)
             # Keep only the periodic (reduced) components
             delta_r_per = delta_r[np.array(self._per)]  # Shape: (dim_k,)
-            # delta_r_per_cart = delta_r_per @ lat_per
 
             # Compute phase factors for all k-points
             phase = np.exp(1j * 2 * np.pi * k_pts @ delta_r_per)  # Shape: (n_kpts,)
@@ -441,11 +425,6 @@ class Model(tb_model):
                 deriv = 1j * delta_r_per @ lat_per  # Cartesian derivative (x, y, z)
             else:
                 deriv = 1j * 2 * np.pi * delta_r_per # d/dkappa (k1, k2, k3)
-
-            # deriv @= recip_lat_unit  # project into k_mu direction
-            # Include Jacobian for non-orthogonal lattices
-            # deriv = 1j * 2*np.pi * (delta_r_per @ inv_recip_lat)
-            # deriv = 1j * 2*np.pi * delta_r_per * recip_lat_mag 
 
             deriv = deriv[:, np.newaxis] * phase[np.newaxis, :] # shape: (dim_k, n_kpts)
 
@@ -560,7 +539,7 @@ class Model(tb_model):
 
     def Chern(self, dirs=(0,1)):
         """
-        Only works for 2d systems right now
+        Only works for >2d systems
         """
         
         nks = (100,) * self._dim_k
@@ -804,7 +783,7 @@ class K_mesh():
         # self.idx_arr = np.array(list(product(*[range(nk) for nk in nks])))  # 1D list of all k_indices (integers)
         self.idx_arr = np.indices(nks).reshape(len(nks), -1).T
 
-        k_vals = [np.arange(nk) / nk for nk in nks] # exlcudes endpoint
+        k_vals = [np.linspace(0, 1, nk, endpoint=False) for nk in nks] # exlcudes endpoint
 
         sq_mesh = np.meshgrid(*k_vals, indexing='ij')
         self.flat_mesh = np.stack(sq_mesh, axis=-1).reshape(-1, len(nks)) # 1D list of k-vectors
@@ -940,7 +919,7 @@ class K_mesh():
             print(f"Finite difference weights: {w}")
         return w, k_shell, idx_shell
     
-    
+
     def get_boundary_phase(self):
         """
         Get phase factors to multiply the cell periodic states in the first BZ
@@ -953,68 +932,52 @@ class K_mesh():
                 counter-clockwise (e.g. square lattice 0 --> [1, 0], 1 --> [0, 1] etc.)
 
         """
-        idx_shell = self.nnbr_idx_shell
-        n_shell = idx_shell[0].shape[0]
-        k_idx_arr = self.idx_arr
-        Nk, dim_k = k_idx_arr.shape
+        # idx_shell = self.nnbr_idx_shell
+        n_orb = self.model._orb_vecs.shape[0]
 
-        # Use the first shell vector array (shape: (n_shell, dim))
-        shell = idx_shell[0]  # shape: (n_shell, dim)
 
-        # Compute neighbor indices for all k-points at once: shape (N_k, n_shell, dim)
-        k_nbr_idx = k_idx_arr[:, None, :] + shell[None, :, :]
+        # Prepare vectorized arrays for computation
+        nks_array = np.array(self.nks)  # shape (dim,)
+        Nk = int(np.prod(self.nks))
+        idx_arr = np.array(self.idx_arr)  # shape (Nk, dim)
+        neighbors = np.array(self.nnbr_idx_shell[0])  # shape (N_neighbor, dim)
+ 
+        # Compute neighbor indices for all k-points
+        # k_nbr has shape (Nk, N_neighbor, dim)
+        k_nbr = idx_arr[:, None, :] + neighbors[None, :, :]
+        mod_idx = np.mod(k_nbr, nks_array)
+        diff = k_nbr - mod_idx
+        # G factors: shape (Nk, N_neighbor, dim)
+        G = diff / nks_array
+ 
+        # Identify boundary crossings: if any coordinate equals -1 or equals the mesh size
+        cross_bndry = np.logical_or(
+            np.any(k_nbr == -1, axis=2),
+            np.any(k_nbr == nks_array[None, None, :], axis=2)
+        )
 
-        # Broadcast self.nks (tuple of ints) to shape (dim,) and compute mod indices
-        nks_array = np.array(self.nks)  # shape: (dim,)
-        mod_idx = np.mod(k_nbr_idx, nks_array)
-        diff = k_nbr_idx - mod_idx  # nonzero where boundary is crossed
-        G = diff / nks_array[None, None, :]  # shape: (N_k, n_shell, dim)
+        dot = np.tensordot(G, self.model._orb_vecs.T, axes=([2], [0]))
 
-        # Compute phase factors using tensordot:
-        # self.model._orb_vecs has shape (n_orb, dim), so the dot gives shape (N_k, n_shell, n_orb)
-        phases = np.exp(-1j * 2 * np.pi * np.tensordot(G, self.model._orb_vecs.T, axes=([2],[0])))
+        # Compute dot product for phase factor: shape (Nk, N_neighbor, n_orb)
+        phase = np.exp(-1j * 2 * np.pi * dot)
 
-        # Initialize bc_phase with ones in the appropriate shape:
-        if self.model._nspin == 1:
-            bc_phase = np.ones((*self.nks, n_shell, self.model._orb_vecs.shape[0]), dtype=complex)
-            bc_phase = bc_phase.reshape(Nk, n_shell, self.model._orb_vecs.shape[0])
-            # Replace only where a boundary crossing occurred:
-            # bc_phase[cross_mask] = phases[cross_mask]
-            bc_phase = phases
-            bc_phase = bc_phase.reshape(*self.nks, n_shell, self.model._orb_vecs.shape[0])
-
-        else:
-            bc_phase = np.ones((*self.nks, n_shell, self.model._orb_vecs.shape[0], 2), dtype=complex)
-            bc_phase = bc_phase.reshape(Nk, n_shell, self.model._orb_vecs.shape[0], 2)
-            # Expand phases to match spin dimension:
-            phases_exp = phases[..., np.newaxis]  # shape: (N_k, n_shell, n_orb, 1)
-            bc_phase = phases_exp
-            # Optionally reshape back if needed; here we flatten the last two spin-orbital axes:
-            bc_phase = bc_phase.reshape(*self.nks, n_shell, self.model._orb_vecs.shape[0], 2)
         
-
-        # if self.model._nspin == 1:
-        #     bc_phase = np.ones((*self.nks, idx_shell[0].shape[0], self.model._orb_vecs.shape[0]), dtype=complex)
-        # else:
-        #     bc_phase = np.ones((*self.nks, idx_shell[0].shape[0], self.model._orb_vecs.shape[0], 2), dtype=complex)
-
-        # for k_idx in self.idx_arr: # each index in k-mesh
-        #     for shell_idx, idx_vec in enumerate(idx_shell[0]):  # vecs connecting neighboring indices
-        #         k_nbr_idx = np.array(k_idx) + idx_vec # indices for neighboring k
-        #         mod_idx = np.mod(k_nbr_idx, self.nks) # apply pbc to index
-        #         diff = k_nbr_idx - mod_idx # if mod changed nbr, will be non-zero
-        #         G = np.divide(np.array(diff), np.array(self.nks)) # will be pm 1 where crossed, 0 else
-        #         # if the translated k-index contains -1 or nk_i+1 then we crossed the BZ boundary
-        #         cross_bndry = np.any((k_nbr_idx == -1) | np.logical_or.reduce([k_nbr_idx == nk for nk in self.nks]))
-        #         if cross_bndry:
-        #             if self.model._nspin == 1:
-        #                 bc_phase[k_idx][shell_idx] = np.exp(-1j * 2 * np.pi * self.model._orb_vecs @ G.T).T
-        #             else:
-        #                 bc_phase[k_idx][shell_idx, :] = np.exp(-1j * 2 * np.pi * self.model._orb_vecs @ G.T).T[..., np.newaxis]
-
-        # if self.model._nspin == 2:
-        #     bc_phase = bc_phase.reshape(*bc_phase.shape[:self.dim+1], -1)  
-
+        if self.model._nspin == 1:
+            bc_phase = np.ones((Nk, neighbors.shape[0], n_orb), dtype=complex)
+            # Update only where boundary is crossed
+            bc_phase[cross_bndry] = phase[cross_bndry]
+            # Reshape to original mesh structure: self.nks + (N_neighbor, n_orb)
+            bc_phase = bc_phase.reshape(*self.nks, neighbors.shape[0], n_orb)
+        
+        elif self.model._nspin == 2:  
+            bc_phase = np.ones((Nk, neighbors.shape[0], n_orb, 2), dtype=complex)
+            # Expand phase to include a spin dimension
+            phase = np.repeat(phase[..., np.newaxis], 2, axis=-1)
+            bc_phase[cross_bndry] = phase[cross_bndry]
+            # bc_phase = bc_phase.reshape(*self.nks, neighbors.shape[0], n_orb, 2)
+            # Final reshape: merge orbital and spin dimensions as in original implementation
+            bc_phase = bc_phase.reshape(*self.nks, neighbors.shape[0], n_orb * 2)
+    
         return bc_phase
     
 
@@ -1265,7 +1228,7 @@ class Bloch(wf_array):
         psi_wfs = self._psi_wfs
         u_wfs = self._u_wfs
 
-        if flatten_spin:
+        if flatten_spin and self._nspin == 2:
             # shape is [nk1, ..., nkd, [n_lambda,] n_state, n_orb, n_spin], flatten last two axes
             psi_wfs = psi_wfs.reshape((*psi_wfs.shape[:-2], -1))
             u_wfs = u_wfs.reshape((*u_wfs.shape[:-2], -1))
@@ -2707,6 +2670,7 @@ class Wannier():
             eps=eps, iter_num=iter_num, verbose=verbose, tol=tol, grad_min=grad_min)
         
         u_tilde_wfs = self.tilde_states.get_states(flatten_spin=True)["Cell periodic"]
+        print(u_tilde_wfs.shape)
         util_max_loc = np.einsum('...ji, ...jm -> ...im', U, u_tilde_wfs)
         
         self.set_tilde_states(util_max_loc, cell_periodic=True)
